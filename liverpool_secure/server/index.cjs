@@ -92,6 +92,8 @@ app.post('/api/auth/bootstrap-owner', async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query('begin');
+      // Serialize first-owner bootstrap attempts; SELECT ... FOR UPDATE cannot lock an empty result set.
+      await client.query('select pg_advisory_xact_lock($1, $2)', [724190, 1]);
       const owner = await client.query("select user_id from public.liverpool_app_members where role='owner' limit 1 for update");
       if (owner.rowCount) { await client.query('rollback'); return fail(res, 409, 'OWNER_ALREADY_EXISTS', 'An owner account is already configured. Ask the owner to add this user.'); }
       await client.query("insert into public.liverpool_app_members(user_id,role,is_active) values($1::uuid,'owner',true) on conflict(user_id) do update set role='owner',is_active=true", [user.id]);
