@@ -748,7 +748,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         localStorage.removeItem('lg_owner_bootstrap_code');
         me = await apiRequest<{ user: { id: string; role: User['role']; email?: string | null } }>('/api/auth/me');
       }
-      const profile = await apiRequest<{ state?: Record<string, unknown> }>('/api/state');
+      const profile = await apiRequest<{ state?: Record<string, unknown>; versions?: Record<string, number> }>('/api/state');
+      // The version map must be restored at login; otherwise every existing cloud key is written with version 0 and rejected as a conflict.
+      cloudVersionsRef.current = profile.versions || {};
+      cloudHydratedRef.current = true;
       const inventoryResponse = await apiRequest<{ items: any[] }>('/api/inventory/items');
       const cloudInventory: InventoryItem[] = (inventoryResponse.items || []).map((i: any) => ({ id: String(i.id), branchId: String(i.branch_id), name: String(i.name), category: i.category, sellingPrice: Number(i.selling_price), costPrice: Number(i.cost_price), stockQuantity: Number(i.stock_quantity), minStockThreshold: Number(i.min_stock_threshold) }));
       setInventory(cloudInventory);
