@@ -86,26 +86,35 @@ export const ShiftHandoverView: React.FC = () => {
     .reduce((sum, t) => sum + t.amount, 0);
 
   const cashCollected = shiftTxs
-    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue') && t.paymentMethod === 'cash')
+    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue' || t.type === 'debt_collection') && t.paymentMethod === 'cash')
     .reduce((sum, t) => sum + t.amount, 0);
 
   const electronicCollected = shiftTxs
-    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue') && t.paymentMethod !== 'cash')
+    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue' || t.type === 'debt_collection') && t.paymentMethod !== 'cash')
     .reduce((sum, t) => sum + t.amount, 0);
 
   const expenses = shiftTxs
-    .filter(t => t.type === 'expense' || t.type === 'advance')
+    .filter(t => t.type === 'expense' && t.paymentMethod === 'cash')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const cashWithdrawals = shiftTxs
+    .filter(t => t.type === 'withdrawal' && t.paymentMethod === 'cash')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const cashAdvances = shiftTxs
+    .filter(t => t.type === 'advance' && t.paymentMethod === 'cash')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const cashRefunds = shiftTxs
+    .filter(t => t.type === 'refund' && t.paymentMethod === 'cash')
     .reduce((sum, t) => sum + t.amount, 0);
 
-  const netAmount = cashCollected - expenses;
+  const netAmount = cashCollected - expenses - cashRefunds - cashWithdrawals - cashAdvances;
   const openingCash = activeShift?.openingCash ?? 0;
   // Only cash receipts belong in the physical drawer; electronic receipts are reported separately.
   const closingCalculation = calculateShiftClosing({
     openingCash,
     cashReceipts: cashCollected,
-    cashExpenses: expenses,
-    cashWithdrawals: 0,
-    cashAdvances: 0,
+    cashExpenses: expenses + cashRefunds,
+    cashWithdrawals,
+    cashAdvances,
     actualClosingCash: actualCashEntered !== '' && Number.isFinite(Number(actualCashEntered)) ? Number(actualCashEntered) : openingCash + cashCollected - expenses,
     electronicReceipts: electronicCollected,
   });
