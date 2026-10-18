@@ -38,14 +38,33 @@ async function requireAuth(req, res, next) {
 }
 function requireRole(...roles) { return (req, res, next) => req.auth && roles.includes(req.auth.role) ? next() : fail(res, 403, 'FORBIDDEN', 'Insufficient permissions.'); }
 app.get('/api/health', async (_req, res) => { try { await query('select 1'); res.set('Cache-Control','no-store').json({ok:true,database:'connected'}); } catch(e) { console.error('[health]',e.message); fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.'); } });
-app.get('/api/state', requireAuth, async (_req, res) => {
-  try { const r = await query('select state_key,state_value,version,updated_at from public.liverpool_app_state order by state_key');
-    res.set('Cache-Control','no-store').json({ok:true,state:Object.fromEntries(r.rows.map(x=>[x.state_key,x.state_value])),versions:Object.fromEntries(r.rows.map(x=>[x.state_key,x.version]))});
+const CLOUD_STATE_WRITE_KEYS = new Set([
+  'lg_branches','lg_active_branch_id','lg_devices','lg_sessions','lg_waitlist','lg_inventory',
+  'lg_shifts','lg_active_shift_id','lg_safe_txs','lg_employees','lg_role_permissions',
+  'lg_audit_log','lg_offline_queue','lg_pricing_tiers','lg_rounding_policy','lg_notifications'
+]);
+// Staff receive only operational state needed by the front desk. HR, permissions, audit, and
+// safe transactions remain restricted to management; the client UI is not an authorization boundary.
+const STAFF_STATE_READ_KEYS = new Set([
+  'lg_branches','lg_active_branch_id','lg_devices','lg_sessions','lg_waitlist','lg_inventory',
+  'lg_shifts','lg_active_shift_id','lg_pricing_tiers','lg_rounding_policy','lg_notifications'
+]);
+app.get('/api/state', requireAuth, async (req, res) => {
+  try {
+    const r = await query('select state_key,state_value,version from public.liverpool_app_state order by state_key');
+    const rows = ['owner','admin'].includes(req.auth.role)
+      ? r.rows
+      : r.rows.filter(x => STAFF_STATE_READ_KEYS.has(x.state_key));
+    res.set('Cache-Control','no-store').json({
+      ok:true,
+      state:Object.fromEntries(rows.map(x=>[x.state_key,x.state_value])),
+      versions:Object.fromEntries(rows.map(x=>[x.state_key,x.version]))
+    });
   } catch(e) { console.error('[state:read]',e.message); fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.'); }
 });
 app.put('/api/state/:key', requireAuth, requireRole('owner','admin'), async (req,res) => {
   const key=req.params.key, {value,expectedVersion}=req.body||{};
-  if(!keyPattern.test(key)) return fail(res,400,'INVALID_KEY','Invalid state key.');
+  if(!keyPattern.test(key) || !CLOUD_STATE_WRITE_KEYS.has(key)) return fail(res,400,'INVALID_KEY','State key is not allowed.');
   if(typeof value==='undefined') return fail(res,400,'MISSING_VALUE','State value is required.');
   if(Buffer.byteLength(JSON.stringify(value),'utf8')>500000) return fail(res,413,'VALUE_TOO_LARGE','State value exceeds 500 KB.');
   if(expectedVersion!==null && expectedVersion!==undefined && (!Number.isSafeInteger(expectedVersion)||expectedVersion<0)) return fail(res,400,'INVALID_VERSION','expectedVersion must be non-negative integer or null.');
