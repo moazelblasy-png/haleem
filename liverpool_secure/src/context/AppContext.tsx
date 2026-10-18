@@ -443,7 +443,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addNotification({ title: 'تعذرت المزامنة السحابية', message: 'تم الاحتفاظ بالتغييرات على هذا الجهاز، لكن لم يتأكد حفظها على الخادم. افحص الاتصال وأعد المزامنة.', type: 'warning' });
     });
     cloudSaveQueuesRef.current[key] = next;
-  }, [getSupabaseAccessToken, apiHeaders, addNotification]);
+  }, [getSupabaseAccessToken, apiHeaders]);
 
   // Network listener
   useEffect(() => {
