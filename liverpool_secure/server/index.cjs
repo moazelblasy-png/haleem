@@ -141,7 +141,7 @@ app.get('/api/inventory/items', requireAuth, async (req,res) => {
     res.set('Cache-Control','no-store').json({ok:true,items:result.rows});
   } catch(e) { console.error('[inventory:list]',e.message); fail(res,503,'INVENTORY_UNAVAILABLE','Inventory could not be loaded.'); }
 });
-app.get('/api/finance/cash-transactions', requireAuth, async (req,res) => {
+app.get('/api/finance/cash-transactions', requireAuth, requireRole('owner','admin','supervisor'), async (req,res) => {
   try {
     const branchId = typeof req.query.branchId === 'string' ? req.query.branchId : null;
     const result = branchId
