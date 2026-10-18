@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { ShieldCheck, UserCheck, Lock, Phone, User, Key, AlertTriangle, CheckCircle2, Shield } from 'lucide-react';
+import { ShieldCheck, UserCheck, Lock, Phone, Mail, User, Key, AlertTriangle, CheckCircle2, Shield } from 'lucide-react';
 import { playClickSound } from '../utils/sound';
 
 interface OwnerSetupModalProps {
@@ -22,7 +22,7 @@ export const OwnerSetupModal: React.FC<OwnerSetupModalProps> = ({ isOpen, onClos
   const [confirmPin, setConfirmPin] = useState('');
 
   // Login state
-  const [loginPhone, setLoginPhone] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
   const [loginPin, setLoginPin] = useState('');
   const [requires2FA, setRequires2FA] = useState(false);
   const [twoFactorInput, setTwoFactorInput] = useState('');
@@ -47,7 +47,7 @@ export const OwnerSetupModal: React.FC<OwnerSetupModalProps> = ({ isOpen, onClos
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault(); setErrorMessage(''); setSuccessMessage('');
-    const result = await loginWithSupabase(loginPhone.trim(), loginPin);
+    const result = await loginWithSupabase(loginEmail.trim(), loginPin);
     if (result.success) {
       playClickSound(); setSuccessMessage(result.message); setTimeout(() => onClose(), 700);
     } else setErrorMessage(result.message);
@@ -188,12 +188,12 @@ export const OwnerSetupModal: React.FC<OwnerSetupModalProps> = ({ isOpen, onClos
                       البريد الإلكتروني
                     </label>
                     <div className="relative">
-                      <Phone className="w-4 h-4 text-gray-500 absolute right-3.5 top-3" />
+                      <Mail className="w-4 h-4 text-gray-500 absolute right-3.5 top-3" />
                       <input
                         type="email"
                         required
-                        value={loginPhone}
-                        onChange={e => setLoginPhone(e.target.value)}
+                        value={loginEmail}
+                        onChange={e => setLoginEmail(e.target.value)}
                         placeholder="owner@example.com"
                         className="w-full bg-[#1b1c29] border border-[#2b2e42] rounded-xl pr-10 pl-4 py-2.5 text-sm text-white focus:outline-none focus:border-red-500"
                       />

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { HandoverChecklist } from '../types';
+import { calculateShiftClosing, validateHandoverChecklist } from '../logic/shift';
 import {
   ClipboardList,
   FolderLock,
@@ -85,45 +86,60 @@ export const ShiftHandoverView: React.FC = () => {
     .reduce((sum, t) => sum + t.amount, 0);
 
   const cashCollected = shiftTxs
-    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue') && t.paymentMethod === 'cash')
+    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue' || t.type === 'debt_collection') && t.paymentMethod === 'cash')
     .reduce((sum, t) => sum + t.amount, 0);
 
   const electronicCollected = shiftTxs
-    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue') && t.paymentMethod !== 'cash')
+    .filter(t => (t.type === 'gaming_revenue' || t.type === 'bar_revenue' || t.type === 'debt_collection') && t.paymentMethod !== 'cash')
     .reduce((sum, t) => sum + t.amount, 0);
 
   const expenses = shiftTxs
-    .filter(t => t.type === 'expense' || t.type === 'advance')
+    .filter(t => t.type === 'expense' && t.paymentMethod === 'cash')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const cashWithdrawals = shiftTxs
+    .filter(t => t.type === 'withdrawal' && t.paymentMethod === 'cash')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const cashAdvances = shiftTxs
+    .filter(t => t.type === 'advance' && t.paymentMethod === 'cash')
+    .reduce((sum, t) => sum + t.amount, 0);
+  const cashRefunds = shiftTxs
+    .filter(t => t.type === 'refund' && t.paymentMethod === 'cash')
     .reduce((sum, t) => sum + t.amount, 0);
 
-  const netAmount = Math.max(0, cashCollected - expenses);
-  const openingCash = activeShift?.openingCash || 0;
-  const expectedDrawerCash = Math.max(0, openingCash + cashCollected - expenses);
-  const actualCashNumeric = actualCashEntered !== '' ? parseFloat(actualCashEntered) : expectedDrawerCash;
+  const netAmount = cashCollected - expenses - cashRefunds - cashWithdrawals - cashAdvances;
+  const openingCash = activeShift?.openingCash ?? 0;
+  // Only cash receipts belong in the physical drawer; electronic receipts are reported separately.
+  const closingCalculation = calculateShiftClosing({
+    openingCash,
+    cashReceipts: cashCollected,
+    cashExpenses: expenses + cashRefunds,
+    cashWithdrawals,
+    cashAdvances,
+    actualClosingCash: actualCashEntered !== '' && Number.isFinite(Number(actualCashEntered)) ? Number(actualCashEntered) : openingCash + cashCollected - expenses,
+    electronicReceipts: electronicCollected,
+  });
+  const expectedDrawerCash = closingCalculation.expectedClosingCash;
+  const actualCashNumeric = actualCashEntered !== '' ? Number(actualCashEntered) : expectedDrawerCash;
   const discrepancy = actualCashNumeric - expectedDrawerCash;
 
   const handleStartShift = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!cashCounted || !ps4Checked || !ps5Checked || !controllersCounted) {
+    const checklist: HandoverChecklist = {
+      cashCounted, ps4Checked, ps5Checked, controllersCounted, controllersCount,
+      cupsStockChecked, teaStockChecked, coffeeStockChecked, noodleStockChecked, notes,
+    };
+    const checklistValidation = validateHandoverChecklist(checklist);
+    if (!checklistValidation.isValid) {
       setStatusMessage({
-        text: 'يرجى مراجعة وتحديد كافة بنود قائمة الاستلام الإلزامية أولاً',
+        text: `لا يمكن استلام الوردية قبل إكمال: ${checklistValidation.missingItems.join('، ')}`,
         type: 'error',
       });
       return;
     }
-
-    const checklist: HandoverChecklist = {
-      cashCounted,
-      ps4Checked,
-      ps5Checked,
-      controllersCounted,
-      controllersCount,
-      cupsStockChecked,
-      teaStockChecked,
-      coffeeStockChecked,
-      noodleStockChecked,
-      notes,
-    };
+    if (!Number.isFinite(openingCashInput) || openingCashInput < 0) {
+      setStatusMessage({ text: 'رصيد افتتاح الدرج لازم يكون رقم صحيح وغير سالب', type: 'error' });
+      return;
+    }
 
     startShiftHandover(openingCashInput, checklist, notes);
     playCashSound();
@@ -141,6 +157,10 @@ export const ShiftHandoverView: React.FC = () => {
     }
     if (!ownerPinInput.trim()) {
       setStatusMessage({ text: 'رمز PIN الخاص بالمالك مطلوب لاعتماد الإغلاق', type: 'error' });
+      return;
+    }
+    if (actualCashEntered.trim() === '' || !Number.isFinite(Number(actualCashEntered)) || Number(actualCashEntered) < 0) {
+      setStatusMessage({ text: 'أدخل النقدية الفعلية كرقم صحيح غير سالب قبل إغلاق الوردية', type: 'error' });
       return;
     }
 
