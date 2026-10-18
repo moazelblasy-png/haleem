@@ -377,6 +377,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const completedSessionIds = useRef(new Set<string>());
   const cloudHydratedRef = useRef(false);
   const cloudVersionsRef = useRef<Record<string, number>>({});
+  const cloudSaveQueuesRef = useRef<Record<string, Promise<void>>>({});
   const saleIdempotencyKeyRef = useRef<string | null>(null);
 
   // Read only a Supabase Auth session token. Local app PIN state is never accepted as API identity.
@@ -422,20 +423,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!cloudHydratedRef.current || !CLOUD_STATE_KEYS.includes(key as typeof CLOUD_STATE_KEYS[number])) return;
     const token = getSupabaseAccessToken();
     if (!token) return; // Local PIN login is not a server-authenticated session.
-    void fetch(`/api/state/${encodeURIComponent(key)}`, {
-      method: 'PUT',
-      headers: apiHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ value, expectedVersion: cloudVersionsRef.current[key] ?? 0 }),
-    }).then(async response => {
+
+    // Serialize writes per key so rapid updates don't race with the same expectedVersion.
+    const previous = cloudSaveQueuesRef.current[key] || Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      const response = await fetch(`/api/state/${encodeURIComponent(key)}`, {
+        method: 'PUT',
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ value, expectedVersion: cloudVersionsRef.current[key] ?? 0 }),
+      });
       if (response.status === 409) {
         addNotification({ title: 'تعارض في المزامنة', message: 'البيانات تغيرت على جهاز آخر. حدّث البيانات قبل إعادة المحاولة.', type: 'warning' });
         return;
       }
-      if (!response.ok) throw new Error('Cloud save failed');
+      if (!response.ok) throw new Error(`Cloud save failed (${response.status})`);
       const result = await response.json();
       if (Number.isSafeInteger(result.version)) cloudVersionsRef.current[key] = result.version;
-    }).catch(() => { /* Keep local data; never report a failed write as synced. */ });
-  }, [getSupabaseAccessToken, apiHeaders]);
+    }).catch(() => {
+      addNotification({ title: 'تعذرت المزامنة السحابية', message: 'تم الاحتفاظ بالتغييرات على هذا الجهاز، لكن لم يتأكد حفظها على الخادم. افحص الاتصال وأعد المزامنة.', type: 'warning' });
+    });
+    cloudSaveQueuesRef.current[key] = next;
+  }, [getSupabaseAccessToken, apiHeaders, addNotification]);
 
   // Network listener
   useEffect(() => {
@@ -748,7 +756,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         localStorage.removeItem('lg_owner_bootstrap_code');
         me = await apiRequest<{ user: { id: string; role: User['role']; email?: string | null } }>('/api/auth/me');
       }
-      const profile = await apiRequest<{ state?: Record<string, unknown> }>('/api/state');
+      const profile = await apiRequest<{ state?: Record<string, unknown>; versions?: Record<string, number> }>('/api/state');
+      // The version map must be restored at login; otherwise every existing cloud key is written with version 0 and rejected as a conflict.
+      cloudVersionsRef.current = profile.versions || {};
+      cloudHydratedRef.current = true;
       const inventoryResponse = await apiRequest<{ items: any[] }>('/api/inventory/items');
       const cloudInventory: InventoryItem[] = (inventoryResponse.items || []).map((i: any) => ({ id: String(i.id), branchId: String(i.branch_id), name: String(i.name), category: i.category, sellingPrice: Number(i.selling_price), costPrice: Number(i.cost_price), stockQuantity: Number(i.stock_quantity), minStockThreshold: Number(i.min_stock_threshold) }));
       setInventory(cloudInventory);
