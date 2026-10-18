@@ -1,0 +1,6 @@
+{
+  "name": "Liverpool Gaming - مركز بلايستيشن للألعاب",
+  "description": "نظام إدارة مراكز ألعاب البلايستيشن المتطور - إدارة الفروع (ليفربول، تشيلسي، أنفيلد) والشفتات والجلسات الموقوتة والمفتوحة والميزانية ونظام الكاشير والتحكم بالموظفين وتنبيهات الصوت الذكية وتصدير PDF",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

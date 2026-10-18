@@ -1,0 +1,15 @@
+begin;
+alter table public.liverpool_app_state add column if not exists version bigint not null default 1, add column if not exists updated_by uuid references auth.users(id) on delete set null;
+create table if not exists public.liverpool_app_members(user_id uuid primary key references auth.users(id) on delete cascade, role text not null check(role in ('owner','admin','supervisor','cashier')), is_active boolean not null default true, created_at timestamptz not null default now());
+alter table public.liverpool_app_members enable row level security;
+revoke all on public.liverpool_app_members from anon, authenticated;
+grant all on public.liverpool_app_members to service_role;
+create table if not exists public.liverpool_sync_receipts(id bigint generated always as identity primary key, user_id uuid not null references auth.users(id) on delete cascade, idempotency_key text not null check(length(idempotency_key) between 8 and 128), action_type text not null check(length(action_type) between 1 and 80), payload jsonb not null, performed_at timestamptz not null, received_at timestamptz not null default now(), unique(user_id,idempotency_key));
+create index if not exists liverpool_sync_receipts_received_at_idx on public.liverpool_sync_receipts(received_at desc);
+alter table public.liverpool_sync_receipts enable row level security;
+revoke all on public.liverpool_sync_receipts from anon, authenticated;
+grant all on public.liverpool_sync_receipts to service_role;
+alter table public.liverpool_app_state enable row level security;
+revoke all on public.liverpool_app_state from anon, authenticated;
+grant select,insert,update,delete on public.liverpool_app_state to service_role;
+commit;
