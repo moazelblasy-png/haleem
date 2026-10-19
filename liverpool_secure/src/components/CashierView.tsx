@@ -194,21 +194,26 @@ export const CashierView: React.FC<CashierViewProps> = ({
     playCashSound();
 
     if (currentSession) {
-      const res = completeSession(currentSession.id, {
-        discountType,
-        discountValue,
-        paymentMethod,
-        amountReceived: tenderedNumeric,
-      });
+      try {
+        const res = await completeSession(currentSession.id, {
+          discountType,
+          discountValue,
+          paymentMethod,
+          amountReceived: tenderedNumeric,
+        });
 
-      setCompletedInvoiceData({
-        invoice: res.invoice,
-        change,
-        paid: tenderedNumeric,
-        method: paymentMethod,
-        items: allLineItems,
-      });
-      setIsCompletedModalOpen(true);
+        setCompletedInvoiceData({
+          invoice: res.invoice,
+          change,
+          paid: tenderedNumeric,
+          method: paymentMethod,
+          items: allLineItems,
+        });
+        setIsCompletedModalOpen(true);
+      } catch (error) {
+        alert(error instanceof Error ? error.message : 'تعذر إنهاء الجلسة؛ لم يتم اعتماد الفاتورة');
+        return;
+      }
     } else {
       const saleResult = await sellBarItems(extraItems.map(item => ({ productId: item.productId, quantity: item.quantity })), paymentMethod);
       if (!saleResult.success) {
