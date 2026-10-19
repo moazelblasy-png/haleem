@@ -407,7 +407,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
     const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined;
     if (!url || !key) throw new Error('إعدادات Supabase غير موجودة في ملف .env');
-    const response = await fetch(`${url.replace(/\/+$/, '')}/auth/v1/${path}`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const browserOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+    const configuredPublicOrigin = String(import.meta.env.VITE_PUBLIC_APP_URL || 'https://haleem-beta.vercel.app').replace(/\/+$/, '');
+    const redirectOrigin = browserOrigin && !/^https?:\/\/localhost(?::\d+)?$/i.test(browserOrigin) ? browserOrigin : configuredPublicOrigin;
+    const needsRedirect = path === 'signup' || path === 'resend';
+    const authPath = needsRedirect ? `${path}?redirect_to=${encodeURIComponent(`${redirectOrigin}/`)}` : path;
+    const response = await fetch(`${url.replace(/\/+$/, '')}/auth/v1/${authPath}`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const payload = await response.json().catch(() => ({}));
     const rawMessage = payload.msg || payload.message || payload.error_description || payload.error || '';
     const authMessage = typeof rawMessage === 'string' ? rawMessage : String(rawMessage?.message || '');
