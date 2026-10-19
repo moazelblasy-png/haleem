@@ -37,7 +37,7 @@ function registerSessionFinanceRoutes(app, deps) {
         !Array.isArray(allocations) || allocations.length > 8) {
       return {ok:false,status:400,code:'INVALID_SESSION_INVOICE',message:'Session invoice fields are invalid.'};
     }
-    const fields = ['gamingTotal','productsTotal','grandTotal','actualCollected','remainingDebt','discountValue'];
+    const fields = ['gamingTotal','productsTotal','billableProductsTotal','grossTotal','grandTotal','actualCollected','remainingDebt','discountValue','discountAmount'];
     if (!fields.every(key => finiteSessionMoney(financials[key])) ||
         !['none','fixed','percent'].includes(completedSession.discountType) ||
         !['cash','instapay','vodafone','card','split'].includes(completedSession.paymentMethod) ||
@@ -47,6 +47,22 @@ function registerSessionFinanceRoutes(app, deps) {
         !finiteSessionMoney(completedSession.finalGrandTotal) || !finiteSessionMoney(completedSession.paidAmount) ||
         !finiteSessionMoney(completedSession.remainingDebt)) {
       return {ok:false,status:400,code:'INVALID_INVOICE_TOTALS',message:'Session invoice totals are invalid.'};
+    }
+    const expectedGross = Math.round((financials.gamingTotal + financials.billableProductsTotal) * 100) / 100;
+    const boundedDiscount = completedSession.discountType === 'percent'
+      ? Math.round((financials.grossTotal * Math.min(100, financials.discountValue) / 100) * 100) / 100
+      : completedSession.discountType === 'fixed'
+        ? Math.min(financials.grossTotal, financials.discountValue)
+        : 0;
+    const expectedGrand = Math.max(0, Math.round((financials.grossTotal - financials.discountAmount) * 100) / 100);
+    if (!sessionMoneyEqual(financials.grossTotal, expectedGross) ||
+        !sessionMoneyEqual(financials.discountAmount, boundedDiscount) ||
+        !sessionMoneyEqual(financials.grandTotal, expectedGrand) ||
+        !sessionMoneyEqual(completedSession.finalProductsTotal, financials.productsTotal) ||
+        (completedSession.discountType === 'none' && financials.discountAmount !== 0) ||
+        financials.billableProductsTotal > financials.productsTotal + 0.01 ||
+        financials.discountValue > 100000000) {
+      return {ok:false,status:400,code:'INVOICE_RECONCILIATION_FAILED',message:'Invoice products, discount, and totals do not reconcile.'};
     }
     let allocationTotal = 0;
     for (const item of allocations) {
@@ -111,12 +127,13 @@ function registerSessionFinanceRoutes(app, deps) {
     }
 
     await client.query(
-      'insert into public.liverpool_session_invoices (idempotency_key,session_id,branch_id,shift_id,cashier_id,session_number,customer_name,customer_phone,gaming_total,products_total,discount_type,discount_value,grand_total,prepaid_amount,collected_amount,remaining_debt,payment_method,split_payments,session_snapshot) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19::jsonb)',
+      'insert into public.liverpool_session_invoices (idempotency_key,session_id,branch_id,shift_id,cashier_id,session_number,customer_name,customer_phone,gaming_total,products_total,billable_products_total,discount_type,discount_value,discount_amount,grand_total,prepaid_amount,collected_amount,remaining_debt,payment_method,split_payments,session_snapshot) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb)',
       [idempotencyKey,sessionId,current.branchId,shiftId,auth.userId,completedSession.sessionNumber,
         completedSession.customerName.trim(),typeof completedSession.customerPhone==='string'?completedSession.customerPhone.slice(0,40):null,
-        financials.gamingTotal.toFixed(2),financials.productsTotal.toFixed(2),completedSession.discountType,
-        financials.discountValue.toFixed(2),financials.grandTotal.toFixed(2),oldPaid.toFixed(2),collected.toFixed(2),
-        financials.remainingDebt.toFixed(2),completedSession.paymentMethod,
+        financials.gamingTotal.toFixed(2),financials.productsTotal.toFixed(2),financials.billableProductsTotal.toFixed(2),
+        completedSession.discountType,financials.discountValue.toFixed(2),financials.discountAmount.toFixed(2),
+        financials.grandTotal.toFixed(2),oldPaid.toFixed(2),collected.toFixed(2),financials.remainingDebt.toFixed(2),
+        completedSession.paymentMethod,
         JSON.stringify(Array.isArray(completedSession.splitPayments)?completedSession.splitPayments:[]),JSON.stringify(completedSession)],
     );
 
@@ -247,10 +264,10 @@ function registerSessionFinanceRoutes(app, deps) {
       if(to){params.push(to);filters.push('created_at < ($'+params.length+'::timestamptz + interval \'1 day\')');}
       params.push(500);
       const result=await query(
-        'select id,session_id,branch_id,shift_id,cashier_id,session_number,customer_name,customer_phone,gaming_total,products_total,discount_type,discount_value,grand_total,prepaid_amount,collected_amount,remaining_debt,payment_method,split_payments,created_at from public.liverpool_session_invoices '+
+        'select id,session_id,branch_id,shift_id,cashier_id,session_number,customer_name,customer_phone,gaming_total,products_total,billable_products_total,discount_type,discount_value,discount_amount,grand_total,prepaid_amount,collected_amount,remaining_debt,payment_method,split_payments,created_at from public.liverpool_session_invoices '+
         (filters.length?'where '+filters.join(' and '):'')+' order by created_at desc limit $'+params.length,params,
       );
-      res.set('Cache-Control','no-store').json({ok:true,invoices:result.rows.map(row=>({...row,gaming_total:Number(row.gaming_total),products_total:Number(row.products_total),discount_value:Number(row.discount_value),grand_total:Number(row.grand_total),prepaid_amount:Number(row.prepaid_amount),collected_amount:Number(row.collected_amount),remaining_debt:Number(row.remaining_debt)}))});
+      res.set('Cache-Control','no-store').json({ok:true,invoices:result.rows.map(row=>({...row,gaming_total:Number(row.gaming_total),products_total:Number(row.products_total),billable_products_total:Number(row.billable_products_total),discount_value:Number(row.discount_value),discount_amount:Number(row.discount_amount),grand_total:Number(row.grand_total),prepaid_amount:Number(row.prepaid_amount),collected_amount:Number(row.collected_amount),remaining_debt:Number(row.remaining_debt)}))});
     } catch(e){console.error('[session-invoices:list]',e.message);fail(res,503,'SESSION_INVOICES_UNAVAILABLE','Session invoices could not be loaded.');}
   });
 
