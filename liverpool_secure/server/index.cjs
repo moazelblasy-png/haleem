@@ -152,7 +152,7 @@ app.get('/api/auth/me', requireAuth, (req,res) => res.set('Cache-Control','no-st
 app.get('/api/admin/members', requireAuth, requireRole('owner','admin'), async (req, res) => {
   if (!req.auth.branchScopeConfigured) return fail(res, 503, 'BRANCH_SCOPE_NOT_CONFIGURED', 'Apply the branch-membership database migration before managing memberships.');
   try {
-    const result = await query(`select m.user_id as "userId", u.email, m.role, m.is_active as "isActive", m.branch_id as "branchId", m.created_at as "createdAt" from public.liverpool_app_members m left join auth.users u on u.id=m.user_id order by m.created_at asc`);
+    const result = await query(`select u.id as "userId", u.email, m.role, coalesce(m.is_active,false) as "isActive", m.branch_id as "branchId", coalesce(m.created_at,u.created_at) as "createdAt" from auth.users u left join public.liverpool_app_members m on m.user_id=u.id order by u.created_at asc`);
     res.set('Cache-Control','no-store').json({ ok:true, members:result.rows });
   } catch(e) { console.error('[members:list]',e.message); fail(res,503,'MEMBERS_UNAVAILABLE','Memberships could not be loaded.'); }
 });
