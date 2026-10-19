@@ -132,11 +132,18 @@ app.post('/api/finance/sales', requireAuth, requireRole('owner','admin','supervi
   const client=await pool.connect();
   try {
     await client.query('begin');
-    const prior=await client.query('select id,total,created_at from public.liverpool_sales where idempotency_key=$1',[b.idempotencyKey]);
+    const prior=await client.query('select id,total,created_at,branch_id,shift_id,cashier_id,payment_method from public.liverpool_sales where idempotency_key=$1',[b.idempotencyKey]);
     if(prior.rowCount){
-      const priorItems = await client.query('select si.inventory_id as "inventoryId", i.stock_quantity as "remainingStock" from public.liverpool_sale_items si join public.liverpool_inventory i on i.id=si.inventory_id where si.sale_id=$1',[prior.rows[0].id]);
+      const existing=prior.rows[0];
+      const priorItems = await client.query('select inventory_id as "inventoryId", quantity from public.liverpool_sale_items where sale_id=$1 order by inventory_id',[existing.id]);
+      const requestedItems=[...grouped.entries()].sort(([a],[b])=>a.localeCompare(b));
+      const savedItems=priorItems.rows.map(item=>[item.inventoryId,Number(item.quantity)]);
+      const sameItems=requestedItems.length===savedItems.length&&requestedItems.every(([id,quantity],index)=>id===savedItems[index][0]&&quantity===savedItems[index][1]);
+      const same=existing.branch_id===b.branchId&&existing.shift_id===b.shiftId&&existing.cashier_id===req.auth.userId&&existing.payment_method===b.paymentMethod&&sameItems;
+      if(!same){await client.query('rollback');return fail(res,409,'IDEMPOTENCY_KEY_REUSED','This idempotency key was already used for a different sale.');}
+      const remainingItems = await client.query('select si.inventory_id as "inventoryId", i.stock_quantity as "remainingStock" from public.liverpool_sale_items si join public.liverpool_inventory i on i.id=si.inventory_id where si.sale_id=$1',[existing.id]);
       await client.query('commit');
-      return res.json({ok:true,duplicate:true,sale:prior.rows[0],total:Number(prior.rows[0].total),items:priorItems.rows});
+      return res.json({ok:true,duplicate:true,sale:existing,total:Number(existing.total),items:remainingItems.rows});
     }
     const ids=[...grouped.keys()];
     const products=await client.query('select id,branch_id,name,selling_price,cost_price,stock_quantity from public.liverpool_inventory where id=any($1::text[]) and is_active=true order by id for update',[ids]);
