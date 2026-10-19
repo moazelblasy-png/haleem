@@ -3,6 +3,58 @@
 const MANAGEMENT_ROLES = new Set(['owner', 'admin']);
 const VALID_BRANCH_ID = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 
+// Staff may update only operational state for their assigned branch. Inventory is
+// authoritative in liverpool_inventory and is intentionally excluded here.
+const BRANCH_SCOPED_ARRAY_STATE_KEYS = new Set([
+  'lg_devices',
+  'lg_sessions',
+  'lg_waitlist',
+  'lg_shifts',
+  'lg_notifications',
+]);
+const STAFF_STATE_WRITERS = {
+  lg_devices: new Set(['supervisor', 'technician']),
+  lg_sessions: new Set(['supervisor', 'cashier']),
+  lg_waitlist: new Set(['supervisor', 'cashier']),
+  lg_shifts: new Set(['supervisor', 'cashier']),
+  lg_active_shift_id: new Set(['supervisor', 'cashier']),
+  lg_notifications: new Set(['supervisor', 'cashier', 'technician']),
+};
+
+function canWriteBranchScopedState(role, key) {
+  return Boolean(STAFF_STATE_WRITERS[key]?.has(role));
+}
+
+/**
+ * Replace one branch's partition without overwriting any other branch's records.
+ * The caller must hold a database row lock around the read/merge/write operation.
+ */
+function mergeBranchScopedArray(currentValue, incomingValue, branchId, key) {
+  if (!BRANCH_SCOPED_ARRAY_STATE_KEYS.has(key)) {
+    throw new Error('State key is not branch-mergeable.');
+  }
+  if (!validBranchId(branchId) || !Array.isArray(incomingValue)) {
+    throw new Error('Branch-scoped state must be an array for a valid branch.');
+  }
+
+  const seen = new Set();
+  for (const item of incomingValue) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || item.branchId !== branchId) {
+      throw new Error('Branch-scoped state contains an item outside the assigned branch.');
+    }
+    if (typeof item.id !== 'string' || item.id.length < 1 || item.id.length > 160 || seen.has(item.id)) {
+      throw new Error('Branch-scoped state contains an invalid or duplicate item id.');
+    }
+    seen.add(item.id);
+  }
+
+  const current = Array.isArray(currentValue) ? currentValue : [];
+  return [
+    ...current.filter((item) => !item || item.branchId !== branchId),
+    ...incomingValue,
+  ];
+}
+
 function isManagementRole(role) {
   return MANAGEMENT_ROLES.has(role);
 }
@@ -91,6 +143,9 @@ function scopeOperationalState(state, branchId) {
 }
 
 module.exports = {
+  BRANCH_SCOPED_ARRAY_STATE_KEYS,
+  canWriteBranchScopedState,
+  mergeBranchScopedArray,
   authorizeBranch,
   isManagementRole,
   resolveBranchFilter,
