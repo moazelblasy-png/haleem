@@ -39,28 +39,40 @@ export interface InvoiceCalculationResult {
  * Calculates a complete invoice with strict validation of collected amounts,
  * partial payments, and split payment methods.
  */
+function nonNegativeFinite(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+const PAYMENT_METHODS = new Set(['cash', 'instapay', 'vodafone', 'card']);
+
+function safePaymentMethod(value: unknown): 'cash' | 'instapay' | 'vodafone' | 'card' {
+  return typeof value === 'string' && PAYMENT_METHODS.has(value) ? value as 'cash' | 'instapay' | 'vodafone' | 'card' : 'cash';
+}
+
 export function calculateInvoice(input: InvoiceCalculationInput): InvoiceCalculationResult {
-  const grossTotal = Math.max(0, input.gamingTotal + input.productsTotal);
+  const gamingTotal = nonNegativeFinite(input.gamingTotal);
+  const productsTotal = nonNegativeFinite(input.productsTotal);
+  const grossTotal = Math.round((gamingTotal + productsTotal) * 100) / 100;
   
   // Calculate discount
   let discountAmount = 0;
   if (input.discountType === 'percent') {
-    const pct = Math.max(0, Math.min(100, input.discountValue));
+    const pct = Math.max(0, Math.min(100, nonNegativeFinite(input.discountValue)));
     discountAmount = Math.round(((grossTotal * pct) / 100) * 100) / 100;
   } else if (input.discountType === 'fixed') {
-    discountAmount = Math.max(0, Math.min(grossTotal, input.discountValue));
+    discountAmount = Math.max(0, Math.min(grossTotal, nonNegativeFinite(input.discountValue)));
   }
   
   const netGrandTotal = Math.max(0, grossTotal - discountAmount);
-  const prepaid = Math.max(0, input.prepaidAmount || 0);
+  const prepaid = nonNegativeFinite(input.prepaidAmount);
   const effectiveBalanceDue = Math.max(0, netGrandTotal - prepaid);
 
   // Validate received amount
-  let totalReceived = Math.max(0, input.amountReceived || 0);
+  let totalReceived = nonNegativeFinite(input.amountReceived);
   
   // If split payments are provided, ensure total received matches the split portions
   if (input.splitPayments && input.splitPayments.length > 0) {
-    const splitSum = input.splitPayments.reduce((sum, p) => sum + Math.max(0, p.amount), 0);
+    const splitSum = input.splitPayments.reduce((sum, p) => sum + nonNegativeFinite(p.amount), 0);
     totalReceived = splitSum;
   }
 
@@ -97,12 +109,12 @@ export function calculateInvoice(input: InvoiceCalculationInput): InvoiceCalcula
       let remainingToAllocate = actualCollected;
       for (const split of input.splitPayments) {
         if (remainingToAllocate <= 0) break;
-        const allocAmount = Math.min(split.amount, remainingToAllocate);
+        const allocAmount = Math.min(nonNegativeFinite(split.amount), remainingToAllocate);
         if (allocAmount > 0) {
           safeAllocations.push({
             type: 'gaming_revenue',
             amount: allocAmount,
-            paymentMethod: split.method,
+            paymentMethod: safePaymentMethod(split.method),
             description: `تحصيل فاتورة (دفع مجزأ - ${split.method})`,
           });
           remainingToAllocate -= allocAmount;
@@ -113,7 +125,7 @@ export function calculateInvoice(input: InvoiceCalculationInput): InvoiceCalcula
       safeAllocations.push({
         type: 'gaming_revenue',
         amount: actualCollected,
-        paymentMethod: input.paymentMethod || 'cash',
+        paymentMethod: safePaymentMethod(input.paymentMethod),
         description: `تحصيل فاتورة`,
       });
     }
@@ -152,8 +164,8 @@ export function settleDebtPayment(
     description: string;
   };
 } {
-  const debt = Math.max(0, currentRemainingDebt);
-  const paid = Math.max(0, amountPaid);
+  const debt = nonNegativeFinite(currentRemainingDebt);
+  const paid = nonNegativeFinite(amountPaid);
   
   const collectedAmount = Math.min(debt, paid);
   const changeGiven = Math.max(0, paid - debt);
@@ -168,7 +180,7 @@ export function settleDebtPayment(
     safeTransaction: {
       type: 'debt_collection',
       amount: collectedAmount,
-      paymentMethod,
+      paymentMethod: safePaymentMethod(paymentMethod),
       description: `سداد مديونية سابقة`,
     },
   };
