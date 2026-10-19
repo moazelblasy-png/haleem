@@ -653,7 +653,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }).then(async response => {
       const result = await response.json().catch(() => ({}));
       if (!response.ok || result.ok !== true) throw new Error(result?.error?.message || 'Sync failed');
-      const accepted = new Set((result.results || []).filter((x: any) => x.accepted && x.executed === true).map((x: any) => x.idempotencyKey));
+      const executedResults = (result.results || []).filter((x: any) => x.accepted && x.executed === true);
+      const accepted = new Set(executedResults.map((x: any) => x.idempotencyKey));
+      for (const item of executedResults) {
+        if (item.versions && typeof item.versions === 'object') Object.assign(cloudVersionsRef.current, item.versions);
+      }
       if (accepted.size !== pending.length) throw new Error('Some queued actions have not been executed by the server.');
       setOfflineQueue(prev => prev.map(item => accepted.has(item.idempotencyKey || item.id) ? { ...item, status: 'synced' } : item));
       addNotification({ title: 'تم تنفيذ العمليات المتأخرة', message: 'تم تنفيذ ' + accepted.size + ' عملية على الخادم وتأكيد حفظها.', type: 'success' });
