@@ -231,10 +231,10 @@ test('Non-finite invoice amounts are treated as zero instead of poisoning totals
   assert.equal(result.discountAmount, 0);
   assert.equal(result.netGrandTotal, 50);
   assert.equal(result.effectiveBalanceDue, 50);
-  assert.equal(result.actualCollected, 50);
+  assert.equal(result.actualCollected, 0);
   assert.equal(result.changeGiven, 0);
-  assert.equal(result.remainingDebt, 0);
-  assert.equal(result.safeAllocations[0].paymentMethod, 'cash');
+  assert.equal(result.remainingDebt, 50);
+  assert.equal(result.safeAllocations.length, 0);
 });
 
 test('Non-finite split-payment values do not create invalid safe allocations', () => {
