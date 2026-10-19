@@ -147,6 +147,70 @@ app.post('/api/auth/bootstrap-owner', async (req, res) => {
 });
 app.get('/api/auth/me', requireAuth, (req,res) => res.set('Cache-Control','no-store').json({ok:true,user:req.auth}));
 
+ 
+// Owner-managed Supabase memberships. Staff are assigned to exactly one branch.
+app.get('/api/admin/members', requireAuth, requireRole('owner','admin'), async (req, res) => {
+  if (!req.auth.branchScopeConfigured) return fail(res, 503, 'BRANCH_SCOPE_NOT_CONFIGURED', 'Apply the branch-membership database migration before managing memberships.');
+  try {
+    const result = await query(`select m.user_id as "userId", u.email, m.role, m.is_active as "isActive", m.branch_id as "branchId", m.created_at as "createdAt" from public.liverpool_app_members m left join auth.users u on u.id=m.user_id order by m.created_at asc`);
+    res.set('Cache-Control','no-store').json({ ok:true, members:result.rows });
+  } catch(e) { console.error('[members:list]',e.message); fail(res,503,'MEMBERS_UNAVAILABLE','Memberships could not be loaded.'); }
+});
+
+app.put('/api/admin/members/:userId', requireAuth, requireRole('owner'), async (req, res) => {
+  if (!req.auth.branchScopeConfigured) return fail(res, 503, 'BRANCH_SCOPE_NOT_CONFIGURED', 'Apply the branch-membership database migration before assigning staff.');
+  const targetUserId = req.params.userId;
+  const b = req.body || {};
+  const allowedRoles = new Set(['admin','supervisor','cashier','technician']);
+  if (!uuidPattern.test(targetUserId) || !allowedRoles.has(b.role) ||
+      (b.isActive !== undefined && typeof b.isActive !== 'boolean')) {
+    return fail(res, 400, 'INVALID_MEMBER', 'Member identity, role, or active status is invalid.');
+  }
+  let branchId = null;
+  if (b.role === 'admin') {
+    if (b.branchId !== undefined && b.branchId !== null && b.branchId !== '') {
+      return fail(res, 400, 'INVALID_MEMBER_BRANCH', 'Admin accounts have global access and must not have a branch assignment.');
+    }
+  } else {
+    if (!validBranchId(b.branchId)) return fail(res, 400, 'INVALID_MEMBER_BRANCH', 'Supervisor, cashier, and technician accounts require a valid branch assignment.');
+    branchId = b.branchId;
+  }
+
+  const client = await pool?.connect().catch(() => null);
+  if (!client) return fail(res, 503, 'DATABASE_UNAVAILABLE', 'Database unavailable.');
+  try {
+    await client.query('begin');
+    const authUser = await client.query('select id, email from auth.users where id=$1::uuid', [targetUserId]);
+    if (!authUser.rowCount) {
+      await client.query('rollback');
+      return fail(res, 404, 'AUTH_USER_NOT_FOUND', 'Create the Supabase Auth account before assigning application access.');
+    }
+    const existing = await client.query('select role from public.liverpool_app_members where user_id=$1::uuid for update', [targetUserId]);
+    if (existing.rows[0]?.role === 'owner') {
+      await client.query('rollback');
+      return fail(res, 409, 'OWNER_ROLE_PROTECTED', 'The primary owner membership cannot be changed through this endpoint.');
+    }
+    const result = await client.query(
+      `insert into public.liverpool_app_members(user_id,role,is_active,branch_id)
+       values($1::uuid,$2,$3,$4)
+       on conflict(user_id) do update set role=excluded.role,is_active=excluded.is_active,branch_id=excluded.branch_id
+       where public.liverpool_app_members.role <> 'owner'
+       returning user_id as "userId",role,is_active as "isActive",branch_id as "branchId",created_at as "createdAt"`,
+      [targetUserId, b.role, b.isActive ?? true, branchId]
+    );
+    if (!result.rowCount) {
+      await client.query('rollback');
+      return fail(res, 409, 'OWNER_ROLE_PROTECTED', 'The primary owner membership cannot be changed through this endpoint.');
+    }
+    await client.query('commit');
+    return res.json({ ok:true, member:{ ...result.rows[0], email:authUser.rows[0].email || null } });
+  } catch(e) {
+    await client.query('rollback').catch(()=>{});
+    console.error('[members:upsert]',e.message);
+    return fail(res,503,'MEMBER_SAVE_FAILED','Membership could not be saved.');
+  } finally { client.release(); }
+});
+
 
 // Owner-managed Supabase memberships. Staff are assigned to exactly one branch.
 app.get('/api/admin/members', requireAuth, requireRole('owner','admin'), async (req, res) => {
