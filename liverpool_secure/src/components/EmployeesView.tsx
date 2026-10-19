@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { playClickSound } from '../utils/sound';
 import { exportPayrollReportPDF } from '../utils/pdfExport';
+import { localDateKey } from '../utils/runtime';
 
 export const EmployeesView: React.FC = () => {
   const {
@@ -101,7 +102,7 @@ export const EmployeesView: React.FC = () => {
 
   // Dynamic counts
   const totalEmployeesCount = employees.length;
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayKey = localDateKey();
   const activeNowCount = employees.filter(e => {
     const todayLog = e.attendanceLogs.find(log => log.date === todayKey);
     return Boolean(todayLog && !todayLog.clockOut);
