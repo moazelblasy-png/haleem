@@ -69,13 +69,14 @@ test('operational state returned to staff contains only their branch', () => {
 });
 
 test('staff state write permissions are narrow and role-specific', () => {
-  assert.equal(canWriteBranchScopedState('cashier', 'lg_sessions'), true);
+  assert.equal(canWriteBranchScopedState('cashier', 'lg_sessions'), false);
   assert.equal(canWriteBranchScopedState('cashier', 'lg_devices'), false);
   assert.equal(canWriteBranchScopedState('technician', 'lg_devices'), true);
   assert.equal(canWriteBranchScopedState('technician', 'lg_sessions'), false);
   assert.equal(canWriteBranchScopedState('supervisor', 'lg_shifts'), true);
   assert.equal(canWriteBranchScopedState('cashier', 'lg_employees'), false);
   assert.equal(canWriteBranchScopedState('cashier', 'lg_inventory'), false);
+  assert.equal(canWriteBranchScopedState('cashier', 'lg_notifications'), false);
 });
 
 test('branch-scoped state updates preserve every other branch', () => {
