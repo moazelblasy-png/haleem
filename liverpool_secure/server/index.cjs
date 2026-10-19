@@ -198,7 +198,7 @@ async function applyStartSession(client, auth, payload, idempotencyKey) {
     if (!same || priorSession.status !== 'active') {
       return { ok:false,status:409,code:'SESSION_ID_CONFLICT',message:'This session identifier already belongs to another session.' };
     }
-    return { ok:true,duplicate:true,sessionId:session.id,versions:{lg_sessions:state.__versions?.lg_sessions,lg_devices:state.__versions?.lg_devices} };
+    return { ok:true,duplicate:true,sessionId:session.id,session:priorSession,versions:{lg_sessions:state.__versions?.lg_sessions,lg_devices:state.__versions?.lg_devices} };
   }
 
   const device = devices.find(item => item && item.id === session.deviceId);
@@ -243,7 +243,7 @@ async function applyStartSession(client, auth, payload, idempotencyKey) {
     );
   }
 
-  return { ok:true,duplicate:false,sessionId:session.id,versions:{lg_sessions:sessionsVersion,lg_devices:devicesVersion} };
+  return { ok:true,duplicate:false,sessionId:session.id,session,versions:{lg_sessions:sessionsVersion,lg_devices:devicesVersion} };
 }
 
 app.post('/api/sessions/start', requireAuth, requireRole('owner','admin','supervisor','cashier'), async(req,res) => {
@@ -275,7 +275,7 @@ app.post('/api/sync/receipts',requireAuth,requireRole('owner','admin','superviso
       a.idempotencyKey.length>110||typeof a.action!=='string'||a.action.length>80||
       !Number.isFinite(a.performedAt)||typeof a.payload==='undefined') return fail(res,400,'INVALID_ACTION','Invalid action item.');
     if(Buffer.byteLength(JSON.stringify(a.payload),'utf8')>100000) return fail(res,413,'PAYLOAD_TOO_LARGE','Action payload exceeds 100 KB.');
-    if(a.action!=='start_session') return fail(res,422,'UNSUPPORTED_OFFLINE_ACTION','This offline action has no server executor yet and will not be marked synced.');
+    if(!['start_session','complete_session','collect_session_debt'].includes(a.action)) return fail(res,422,'UNSUPPORTED_OFFLINE_ACTION','This offline action has no server executor yet and will not be marked synced.');
   }
 
   const client=await pool?.connect().catch(()=>null);
@@ -307,16 +307,19 @@ app.post('/api/sync/receipts',requireAuth,requireRole('owner','admin','superviso
         );
       }
 
-      const execution=await applyStartSession(client,req.auth,action.payload,action.idempotencyKey);
+      let execution;
+      if(action.action==='start_session') execution=await applyStartSession(client,req.auth,action.payload,action.idempotencyKey);
+      else if(action.action==='complete_session') execution=await sessionFinance.applyCompleteSession(client,req.auth,{...(action.payload||{}),idempotencyKey:action.idempotencyKey});
+      else execution=await sessionFinance.applyDebtPayment(client,req.auth,{...(action.payload||{}),idempotencyKey:action.idempotencyKey});
       if(!execution.ok){
         await client.query('rollback');
         return fail(res,execution.status,execution.code,execution.message);
       }
       await client.query(
         'update public.liverpool_sync_receipts set executed_at=coalesce(executed_at,now()),result=$3::jsonb where user_id=$1::uuid and idempotency_key=$2',
-        [req.auth.userId,action.idempotencyKey,JSON.stringify({sessionId:execution.sessionId,duplicate:execution.duplicate,versions:execution.versions || {}})],
+        [req.auth.userId,action.idempotencyKey,JSON.stringify({sessionId:execution.sessionId||execution.session?.id||action.payload?.session?.id||action.payload?.sessionId,session:execution.session||null,transactions:execution.transactions||(execution.transaction?[execution.transaction]:[]),duplicate:execution.duplicate,versions:execution.versions||{}})],
       );
-      results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:duplicate||execution.duplicate,result:{sessionId:execution.sessionId},versions:execution.versions || {}});
+      results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:duplicate||execution.duplicate,result:{sessionId:execution.sessionId||execution.session?.id||action.payload?.session?.id||action.payload?.sessionId,session:execution.session||null,transactions:execution.transactions||(execution.transaction?[execution.transaction]:[])},versions:execution.versions||{}});
     }
     await client.query('commit');
     res.set('Cache-Control','no-store').json({ok:true,results});
