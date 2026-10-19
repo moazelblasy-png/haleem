@@ -128,7 +128,7 @@ app.post('/api/finance/sales', requireAuth, requireRole('owner','admin','supervi
   const b=req.body||{}; const lines=b.items;
   if(!validIdempotency(b.idempotencyKey)||typeof b.branchId!=='string'||b.branchId.length>80||typeof b.shiftId!=='string'||b.shiftId.length>100||!['cash','instapay','vodafone','card'].includes(b.paymentMethod)||!Array.isArray(lines)||lines.length<1||lines.length>50) return fail(res,400,'INVALID_SALE','Sale fields are invalid.');
   const grouped=new Map();
-  for(const line of lines){ if(!line||typeof line.inventoryId!=='string'||line.inventoryId.length>128||!Number.isSafeInteger(line.quantity)||line.quantity<1||line.quantity>10000) return fail(res,400,'INVALID_ITEMS','Sale items are invalid.'); grouped.set(line.inventoryId,(grouped.get(line.inventoryId)||0)+line.quantity); }
+  for(const line of lines){ if(!line||typeof line.inventoryId!=='string'||line.inventoryId.length>128||!Number.isSafeInteger(line.quantity)||line.quantity<1||line.quantity>10000) return fail(res,400,'INVALID_ITEMS','Sale items are invalid.'); const combinedQuantity=(grouped.get(line.inventoryId)||0)+line.quantity; if(!Number.isSafeInteger(combinedQuantity)||combinedQuantity>10000) return fail(res,400,'INVALID_ITEMS','Combined quantity per item must be between 1 and 10000.'); grouped.set(line.inventoryId,combinedQuantity); }
   const client=await pool.connect();
   try {
     await client.query('begin');
