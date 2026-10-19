@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   BarChart3,
@@ -15,6 +15,37 @@ import {
 } from 'lucide-react';
 import { playClickSound } from '../utils/sound';
 
+type SessionInvoiceReport = {
+  id: string;
+  session_id: string;
+  branch_id: string;
+  session_number: string;
+  customer_name: string;
+  customer_phone?: string | null;
+  gaming_total: number;
+  products_total: number;
+  billable_products_total: number;
+  discount_type: 'none' | 'fixed' | 'percent';
+  discount_value: number;
+  discount_amount: number;
+  grand_total: number;
+  prepaid_amount: number;
+  collected_amount: number;
+  remaining_debt: number;
+  payment_method: string;
+  created_at: string;
+};
+
+type SessionDebtPaymentReport = {
+  id: string;
+  session_id: string;
+  branch_id: string;
+  amount: number;
+  payment_method: string;
+  received_by: string;
+  created_at: string;
+};
+
 export const ReportsView: React.FC = () => {
   const {
     devices,
@@ -27,7 +58,85 @@ export const ReportsView: React.FC = () => {
     shifts
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'devices' | 'branches' | 'audit'>('devices');
+  const [activeTab, setActiveTab] = useState<'devices' | 'branches' | 'audit' | 'finance'>('devices');
+  const [sessionInvoices, setSessionInvoices] = useState<SessionInvoiceReport[]>([]);
+  const [sessionDebtPayments, setSessionDebtPayments] = useState<SessionDebtPaymentReport[]>([]);
+  const [financeReportLoading, setFinanceReportLoading] = useState(false);
+  const [financeReportError, setFinanceReportError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadFinancialReports = async () => {
+      if (!currentUser || !['owner', 'admin', 'supervisor'].includes(currentUser.role)) {
+        setSessionInvoices([]);
+        setSessionDebtPayments([]);
+        setFinanceReportError('التقرير المالي السحابي متاح للمالك والإدارة والمشرف فقط.');
+        return;
+      }
+      let accessToken: string | null = null;
+      try {
+        const ownSession = JSON.parse(localStorage.getItem('lg_supabase_session') || 'null');
+        if (typeof ownSession?.access_token === 'string' && ownSession.user?.id === currentUser.id) {
+          accessToken = ownSession.access_token;
+        }
+        if (!accessToken) {
+          for (let index = 0; index < localStorage.length; index++) {
+            const key = localStorage.key(index);
+            if (!key || !/^sb-.+-auth-token$/.test(key)) continue;
+            const value = JSON.parse(localStorage.getItem(key) || '{}');
+            const session = value?.currentSession || value?.session || value;
+            if (typeof session?.access_token === 'string' && session.user?.id === currentUser.id) {
+              accessToken = session.access_token;
+              break;
+            }
+          }
+        }
+      } catch {
+        accessToken = null;
+      }
+      if (!accessToken) {
+        setSessionInvoices([]);
+        setSessionDebtPayments([]);
+        setFinanceReportError('سجّل الدخول بالحساب السحابي لإظهار التقرير المالي المؤكد من الخادم.');
+        return;
+      }
+
+      setFinanceReportLoading(true);
+      setFinanceReportError('');
+      try {
+        const params = new URLSearchParams();
+        if (activeBranch?.id) params.set('branchId', activeBranch.id);
+        const headers = { Accept: 'application/json', Authorization: `Bearer ${accessToken}` };
+        const [invoiceResponse, debtResponse] = await Promise.all([
+          fetch(`/api/finance/session-invoices?${params.toString()}`, { headers, cache: 'no-store' }),
+          fetch(`/api/finance/session-debt-payments?${params.toString()}`, { headers, cache: 'no-store' }),
+        ]);
+        const [invoicePayload, debtPayload] = await Promise.all([
+          invoiceResponse.json().catch(() => ({})),
+          debtResponse.json().catch(() => ({})),
+        ]);
+        if (!invoiceResponse.ok || invoicePayload.ok !== true) {
+          throw new Error(invoicePayload?.error?.message || 'تعذر تحميل فواتير الجلسات من الخادم.');
+        }
+        if (!debtResponse.ok || debtPayload.ok !== true) {
+          throw new Error(debtPayload?.error?.message || 'تعذر تحميل سجل تحصيل المديونيات من الخادم.');
+        }
+        if (cancelled) return;
+        setSessionInvoices(Array.isArray(invoicePayload.invoices) ? invoicePayload.invoices : []);
+        setSessionDebtPayments(Array.isArray(debtPayload.payments) ? debtPayload.payments : []);
+      } catch (error) {
+        if (!cancelled) {
+          setSessionInvoices([]);
+          setSessionDebtPayments([]);
+          setFinanceReportError(error instanceof Error ? error.message : 'تعذر تحميل التقارير المالية.');
+        }
+      } finally {
+        if (!cancelled) setFinanceReportLoading(false);
+      }
+    };
+    void loadFinancialReports();
+    return () => { cancelled = true; };
+  }, [currentUser, activeBranch?.id]);
 
   // Device analytics
   const deviceStats = devices.map(dev => {
@@ -118,6 +227,7 @@ export const ReportsView: React.FC = () => {
         {[
           { id: 'devices', label: 'تقارير الأجهزة والتشغيل' },
           { id: 'branches', label: 'مقارنة الفروع (ليفربول / تشيلسي / أنفيلد)' },
+          { id: 'finance', label: 'الفواتير والمديونيات السحابية' },
           { id: 'audit', label: 'سجل العمليات الإداري (Audit Log)' },
         ].map(tab => (
           <button
@@ -136,6 +246,85 @@ export const ReportsView: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {activeTab === 'finance' && (
+        <div className="space-y-6">
+          <section className="bg-[#14151e] border border-[#232535] rounded-3xl overflow-hidden shadow-xl">
+            <div className="p-4 bg-[#171824] border-b border-[#202232] flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-white">فواتير جلسات اللعب المسجلة على الخادم</h3>
+                <p className="text-xs text-gray-400 mt-1">يعرض هذا التقرير الفواتير المؤكدة في قاعدة البيانات، وليس مجرد الحالة المحلية للمتصفح.</p>
+              </div>
+              <button onClick={() => { playClickSound(); setActiveTab('finance'); }} className="text-xs text-red-300 font-bold">تحديث عند إعادة فتح التقرير</button>
+            </div>
+            {financeReportLoading ? (
+              <div className="p-8 text-center text-gray-400 text-sm">جارٍ تحميل الفواتير والمديونيات...</div>
+            ) : financeReportError ? (
+              <div className="p-6 text-sm text-amber-200">{financeReportError}</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs min-w-[1050px]">
+                  <thead><tr className="border-b border-[#202232] text-gray-400">
+                    <th className="p-3">التاريخ</th><th className="p-3">رقم الجلسة</th><th className="p-3">العميل</th>
+                    <th className="p-3 text-left">الألعاب</th><th className="p-3 text-left">المنتجات</th><th className="p-3 text-left">الخصم</th>
+                    <th className="p-3 text-left">الإجمالي</th><th className="p-3 text-left">المحصّل</th><th className="p-3 text-left">المتبقي</th><th className="p-3">الدفع</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-[#1b1c28]">
+                    {sessionInvoices.length === 0 ? (
+                      <tr><td colSpan={10} className="p-8 text-center text-gray-500">لا توجد فواتير جلسات مسجلة في الفترة المتاحة.</td></tr>
+                    ) : sessionInvoices.map(invoice => (
+                      <tr key={invoice.id} className="text-gray-200 hover:bg-[#181926]">
+                        <td className="p-3 whitespace-nowrap">{new Date(invoice.created_at).toLocaleString('ar-EG')}</td>
+                        <td className="p-3 font-mono">{invoice.session_number}</td>
+                        <td className="p-3">{invoice.customer_name}</td>
+                        <td className="p-3 text-left font-mono">{invoice.gaming_total.toFixed(2)}</td>
+                        <td className="p-3 text-left font-mono">{invoice.billable_products_total.toFixed(2)}</td>
+                        <td className="p-3 text-left font-mono">{invoice.discount_amount.toFixed(2)}</td>
+                        <td className="p-3 text-left font-mono font-bold">{invoice.grand_total.toFixed(2)}</td>
+                        <td className="p-3 text-left font-mono text-emerald-300">{invoice.collected_amount.toFixed(2)}</td>
+                        <td className={`p-3 text-left font-mono ${invoice.remaining_debt > 0 ? 'text-amber-300 font-bold' : 'text-gray-400'}`}>{invoice.remaining_debt.toFixed(2)}</td>
+                        <td className="p-3">{invoice.payment_method === 'split' ? 'متعدد' : invoice.payment_method}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+          <section className="bg-[#14151e] border border-[#232535] rounded-3xl overflow-hidden shadow-xl">
+            <div className="p-4 bg-[#171824] border-b border-[#202232]">
+              <h3 className="text-sm font-bold text-white">سجل تحصيل المديونيات</h3>
+              <p className="text-xs text-gray-400 mt-1">كل دفعة مسجلة بمعرّف مستقل لمنع تكرار التحصيل.</p>
+            </div>
+            {financeReportLoading ? (
+              <div className="p-8 text-center text-gray-400 text-sm">جارٍ تحميل سجل التحصيل...</div>
+            ) : financeReportError ? (
+              <div className="p-6 text-sm text-amber-200">{financeReportError}</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs min-w-[700px]">
+                  <thead><tr className="border-b border-[#202232] text-gray-400">
+                    <th className="p-3">التاريخ</th><th className="p-3">معرّف الجلسة</th><th className="p-3">المبلغ</th><th className="p-3">طريقة الدفع</th><th className="p-3">المستخدم</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-[#1b1c28]">
+                    {sessionDebtPayments.length === 0 ? (
+                      <tr><td colSpan={5} className="p-8 text-center text-gray-500">لا توجد دفعات مديونية مسجلة.</td></tr>
+                    ) : sessionDebtPayments.map(payment => (
+                      <tr key={payment.id} className="text-gray-200 hover:bg-[#181926]">
+                        <td className="p-3 whitespace-nowrap">{new Date(payment.created_at).toLocaleString('ar-EG')}</td>
+                        <td className="p-3 font-mono">{payment.session_id}</td>
+                        <td className="p-3 font-mono text-emerald-300">{payment.amount.toFixed(2)} EGP</td>
+                        <td className="p-3">{payment.payment_method}</td>
+                        <td className="p-3 font-mono">{payment.received_by}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
 
       {/* Tab 1: Device Reports */}
       {activeTab === 'devices' && (
