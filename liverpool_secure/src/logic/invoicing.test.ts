@@ -266,3 +266,40 @@ test('Debt settlement sanitizes non-finite amounts and unknown runtime payment m
   assert.equal(result.safeTransaction.amount, 0);
   assert.equal(result.safeTransaction.paymentMethod, 'cash');
 });
+
+
+test('Extremely large finite amounts are bounded before invoice arithmetic', () => {
+  const result = calculateInvoice({
+    gamingTotal: Number.MAX_VALUE,
+    productsTotal: Number.MAX_VALUE,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 0,
+    amountReceived: Number.MAX_VALUE,
+  });
+
+  assert.equal(result.grossTotal, 2_000_000_000_000);
+  assert.equal(result.netGrandTotal, 2_000_000_000_000);
+  assert.equal(result.actualCollected, 1_000_000_000_000);
+  assert.equal(result.remainingDebt, 1_000_000_000_000);
+  assert.ok(Number.isFinite(result.grossTotal));
+  assert.ok(result.safeAllocations.every((item) => Number.isFinite(item.amount)));
+});
+
+
+test('Malformed split-payment entries are ignored instead of crashing invoice calculation', () => {
+  const malformed = [null, undefined, { method: 'cash' }] as unknown as NonNullable<Parameters<typeof calculateInvoice>[0]['splitPayments']>;
+  const result = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 0,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 0,
+    amountReceived: 100,
+    splitPayments: malformed,
+  });
+
+  assert.equal(result.actualCollected, 0);
+  assert.equal(result.remainingDebt, 100);
+  assert.equal(result.safeAllocations.length, 0);
+});
