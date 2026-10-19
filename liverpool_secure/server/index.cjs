@@ -3,7 +3,7 @@ const express = require('express');
 const path = require('node:path');
 const fs = require('node:fs');
 const { Pool } = require('pg');
-const { authorizeBranch, isManagementRole, resolveBranchFilter, scopeOperationalState, validBranchId } = require('./branch-access.cjs');
+const { BRANCH_SCOPED_ARRAY_STATE_KEYS, authorizeBranch, canWriteBranchScopedState, isManagementRole, mergeBranchScopedArray, resolveBranchFilter, scopeOperationalState, validBranchId } = require('./branch-access.cjs');
 const app = express();
 const port = Number(process.env.PORT || 3001);
 const distDir = path.resolve(__dirname, '..', 'dist');
@@ -56,14 +56,14 @@ async function requireAuth(req, res, next) {
 function requireRole(...roles) { return (req, res, next) => req.auth && roles.includes(req.auth.role) ? next() : fail(res, 403, 'FORBIDDEN', 'Insufficient permissions.'); }
 app.get('/api/health', async (_req, res) => { try { await query('select 1'); res.set('Cache-Control','no-store').json({ok:true,database:'connected'}); } catch(e) { console.error('[health]',e.message); fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.'); } });
 const CLOUD_STATE_WRITE_KEYS = new Set([
-  'lg_branches','lg_active_branch_id','lg_devices','lg_sessions','lg_waitlist','lg_inventory',
+  'lg_branches','lg_active_branch_id','lg_devices','lg_sessions','lg_waitlist',
   'lg_shifts','lg_active_shift_id','lg_safe_txs','lg_employees','lg_role_permissions',
   'lg_audit_log','lg_offline_queue','lg_pricing_tiers','lg_rounding_policy','lg_notifications'
 ]);
 // Staff receive only operational state needed by the front desk. HR, permissions, audit, and
 // safe transactions remain restricted to management; the client UI is not an authorization boundary.
 const STAFF_STATE_READ_KEYS = new Set([
-  'lg_branches','lg_active_branch_id','lg_devices','lg_sessions','lg_waitlist','lg_inventory',
+  'lg_branches','lg_active_branch_id','lg_devices','lg_sessions','lg_waitlist',
   'lg_shifts','lg_active_shift_id','lg_pricing_tiers','lg_rounding_policy','lg_notifications'
 ]);
 app.get('/api/state', requireAuth, async (req, res) => {
@@ -74,9 +74,11 @@ app.get('/api/state', requireAuth, async (req, res) => {
       if (!access.allowed) return fail(res, access.status, access.code, access.message);
     }
     const r = await query('select state_key,state_value,version from public.liverpool_app_state order by state_key');
+    // Inventory is authoritative in liverpool_inventory; never hydrate it from an old JSON snapshot.
+    const persistedRows = r.rows.filter(x => x.state_key !== 'lg_inventory');
     const rows = isManagement
-      ? r.rows
-      : r.rows.filter(x => STAFF_STATE_READ_KEYS.has(x.state_key));
+      ? persistedRows
+      : persistedRows.filter(x => STAFF_STATE_READ_KEYS.has(x.state_key));
     const state = Object.fromEntries(rows.map(x => [x.state_key, x.state_value]));
     const versions = Object.fromEntries(rows.map(x => [x.state_key, x.version]));
     res.set('Cache-Control','no-store').json({
@@ -86,29 +88,237 @@ app.get('/api/state', requireAuth, async (req, res) => {
     });
   } catch(e) { console.error('[state:read]',e.message); fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.'); }
 });
-app.put('/api/state/:key', requireAuth, requireRole('owner','admin'), async (req,res) => {
+app.put('/api/state/:key', requireAuth, async (req,res) => {
   const key=req.params.key, {value,expectedVersion}=req.body||{};
   if(!keyPattern.test(key) || !CLOUD_STATE_WRITE_KEYS.has(key)) return fail(res,400,'INVALID_KEY','State key is not allowed.');
   if(typeof value==='undefined') return fail(res,400,'MISSING_VALUE','State value is required.');
   if(Buffer.byteLength(JSON.stringify(value),'utf8')>500000) return fail(res,413,'VALUE_TOO_LARGE','State value exceeds 500 KB.');
   if(expectedVersion!==null && expectedVersion!==undefined && (!Number.isSafeInteger(expectedVersion)||expectedVersion<0)) return fail(res,400,'INVALID_VERSION','expectedVersion must be non-negative integer or null.');
-  const client=await pool?.connect().catch(()=>null); if(!client) return fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.');
+
+  const management = isManagementRole(req.auth.role);
+  if (!management) {
+    const branchAccess = authorizeBranch(req.auth, req.auth.branchId);
+    if (!branchAccess.allowed) return fail(res, branchAccess.status, branchAccess.code, branchAccess.message);
+    if (!BRANCH_SCOPED_ARRAY_STATE_KEYS.has(key) || !canWriteBranchScopedState(req.auth.role, key)) {
+      return fail(res,403,'STATE_WRITE_FORBIDDEN','This role cannot update this shared state key. Use the authorized operational action instead.');
+    }
+  }
+
+  const client=await pool?.connect().catch(()=>null);
+  if(!client) return fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.');
   try {
     await client.query('begin');
-    const current=await client.query('select version from public.liverpool_app_state where state_key=$1 for update',[key]);
-    if(current.rowCount===0 && expectedVersion!=null && expectedVersion!==0){ await client.query('rollback'); return fail(res,409,'VERSION_CONFLICT','State changed on another device; refresh first.'); }
-    if(current.rowCount>0 && expectedVersion!==current.rows[0].version){ await client.query('rollback'); return res.status(409).json({ok:false,error:{code:'VERSION_CONFLICT',message:'State changed on another device; refresh first.'},currentVersion:current.rows[0].version}); }
-    const saved=await client.query(`insert into public.liverpool_app_state(state_key,state_value,version,updated_at,updated_by) values($1,$2::jsonb,1,now(),$3::uuid) on conflict(state_key) do update set state_value=excluded.state_value,version=public.liverpool_app_state.version+1,updated_at=now(),updated_by=excluded.updated_by returning version,updated_at`,[key,JSON.stringify(value),req.auth.userId]);
-    await client.query('commit'); res.set('Cache-Control','no-store').json({ok:true,key,version:saved.rows[0].version,updatedAt:saved.rows[0].updated_at});
-  } catch(e) { await client.query('rollback').catch(()=>{}); console.error('[state:write]',e.message); fail(res,503,'DATABASE_UNAVAILABLE','Could not persist state.'); } finally { client.release(); }
+    const current=await client.query('select state_value,version from public.liverpool_app_state where state_key=$1 for update',[key]);
+    if(current.rowCount===0 && expectedVersion!=null && expectedVersion!==0){
+      await client.query('rollback');
+      return fail(res,409,'VERSION_CONFLICT','State changed on another device; refresh first.');
+    }
+    if(current.rowCount>0 && expectedVersion!==current.rows[0].version){
+      await client.query('rollback');
+      return res.status(409).json({ok:false,error:{code:'VERSION_CONFLICT',message:'State changed on another device; refresh first.'},currentVersion:current.rows[0].version});
+    }
+
+    let valueToSave = value;
+    if (!management) {
+      try {
+        valueToSave = mergeBranchScopedArray(current.rows[0]?.state_value, value, req.auth.branchId, key);
+      } catch (error) {
+        await client.query('rollback');
+        return fail(res,400,'INVALID_BRANCH_STATE',error.message || 'Invalid branch-scoped state.');
+      }
+    }
+
+    const saved=await client.query(
+      'insert into public.liverpool_app_state(state_key,state_value,version,updated_at,updated_by) values($1,$2::jsonb,1,now(),$3::uuid) on conflict(state_key) do update set state_value=excluded.state_value,version=public.liverpool_app_state.version+1,updated_at=now(),updated_by=excluded.updated_by returning version,updated_at',
+      [key,JSON.stringify(valueToSave),req.auth.userId]
+    );
+    await client.query('commit');
+    res.set('Cache-Control','no-store').json({ok:true,key,version:saved.rows[0].version,updatedAt:saved.rows[0].updated_at});
+  } catch(e) {
+    await client.query('rollback').catch(()=>{});
+    console.error('[state:write]',e.message);
+    fail(res,503,'DATABASE_UNAVAILABLE','Could not persist state.');
+  } finally { client.release(); }
 });
+
+async function loadLockedState(client, keys) {
+  const result = await client.query(
+    'select state_key,state_value,version from public.liverpool_app_state where state_key = any($1::text[]) order by state_key for update',
+    [keys],
+  );
+  return Object.fromEntries(result.rows.map(row => [row.state_key, row.state_value]));
+}
+
+async function writeStateValue(client, key, value, userId) {
+  await client.query(
+    'insert into public.liverpool_app_state(state_key,state_value,version,updated_at,updated_by) values($1,$2::jsonb,1,now(),$3::uuid) on conflict(state_key) do update set state_value=excluded.state_value,version=public.liverpool_app_state.version+1,updated_at=now(),updated_by=excluded.updated_by',
+    [key, JSON.stringify(value), userId],
+  );
+}
+
+async function applyStartSession(client, auth, payload, idempotencyKey) {
+  const session = payload && typeof payload === 'object' && payload.session && typeof payload.session === 'object'
+    ? payload.session
+    : payload;
+  const shiftId = payload && typeof payload === 'object' && typeof payload.shiftId === 'string'
+    ? payload.shiftId
+    : '';
+
+  if (!session || typeof session !== 'object' || Array.isArray(session) ||
+      typeof session.id !== 'string' || !/^[A-Za-z0-9:_-]{3,128}$/.test(session.id) ||
+      typeof session.deviceId !== 'string' || session.deviceId.length > 160 ||
+      !validBranchId(session.branchId) || typeof session.sessionNumber !== 'string' ||
+      session.sessionNumber.length > 100 || typeof session.customerName !== 'string' ||
+      session.customerName.trim().length < 1 || session.customerName.length > 160 ||
+      typeof session.gameName !== 'string' || session.gameName.length > 160 ||
+      session.status !== 'active' || !Number.isFinite(session.startTime) ||
+      !Array.isArray(session.segments) || session.segments.length < 1 ||
+      !Array.isArray(session.products) || session.products.length > 100) {
+    return { ok:false,status:400,code:'INVALID_SESSION',message:'Session fields are invalid.' };
+  }
+  if (!validIdempotency(idempotencyKey) || idempotencyKey.length > 110) {
+    return { ok:false,status:400,code:'INVALID_IDEMPOTENCY_KEY',message:'Session idempotency key is invalid.' };
+  }
+
+  const branchAccess = authorizeBranch(auth, session.branchId);
+  if (!branchAccess.allowed) return { ok:false,status:branchAccess.status,code:branchAccess.code,message:branchAccess.message };
+
+  const state = await loadLockedState(client, ['lg_devices','lg_sessions','lg_shifts']);
+  const devices = Array.isArray(state.lg_devices) ? state.lg_devices : [];
+  const sessions = Array.isArray(state.lg_sessions) ? state.lg_sessions : [];
+  const priorSession = sessions.find(item => item && item.id === session.id);
+  if (priorSession) {
+    const same = priorSession.branchId === session.branchId &&
+      priorSession.deviceId === session.deviceId &&
+      priorSession.startTime === session.startTime &&
+      priorSession.sessionNumber === session.sessionNumber;
+    if (!same || priorSession.status !== 'active') {
+      return { ok:false,status:409,code:'SESSION_ID_CONFLICT',message:'This session identifier already belongs to another session.' };
+    }
+    return { ok:true,duplicate:true,sessionId:session.id };
+  }
+
+  const device = devices.find(item => item && item.id === session.deviceId);
+  if (!device) return { ok:false,status:409,code:'DEVICE_NOT_FOUND',message:'Device is not registered in the cloud state. Refresh device setup and retry.' };
+  if (device.branchId !== session.branchId) return { ok:false,status:403,code:'BRANCH_MISMATCH',message:'The selected device belongs to another branch.' };
+  if (device.status !== 'available') return { ok:false,status:409,code:'DEVICE_UNAVAILABLE',message:'The selected device is no longer available.' };
+
+  if (!isManagementRole(auth.role)) {
+    const shifts = Array.isArray(state.lg_shifts) ? state.lg_shifts : [];
+    const activeShift = shifts.find(item => item && item.id === shiftId && item.branchId === session.branchId && item.status === 'open');
+    if (!activeShift) return { ok:false,status:409,code:'OPEN_SHIFT_REQUIRED',message:'An open shift for this branch is required before starting a session.' };
+  }
+
+  const branchSessions = sessions.filter(item => item && item.branchId === session.branchId);
+  const nextSessions = mergeBranchScopedArray(
+    sessions,
+    [session, ...branchSessions.filter(item => item.id !== session.id)],
+    session.branchId,
+    'lg_sessions',
+  );
+  const nextDevicesForBranch = devices
+    .filter(item => item && item.branchId === session.branchId)
+    .map(item => item.id === device.id
+      ? { ...item, status:'busy', currentGame:session.gameName, activeSessionId:session.id }
+      : item);
+  const nextDevices = mergeBranchScopedArray(devices, nextDevicesForBranch, session.branchId, 'lg_devices');
+
+  await writeStateValue(client, 'lg_sessions', nextSessions, auth.userId);
+  await writeStateValue(client, 'lg_devices', nextDevices, auth.userId);
+
+  const paidAmount = Number(session.paidAmount || 0);
+  if (session.isPrepaid === true && Number.isFinite(paidAmount) && paidAmount > 0) {
+    if (paidAmount > 100000000) return { ok:false,status:400,code:'PREPAYMENT_OUT_OF_RANGE',message:'Prepayment amount exceeds the permitted limit.' };
+    const method = ['cash','instapay','vodafone','card'].includes(session.paymentMethod) ? session.paymentMethod : 'cash';
+    const transactionKey = idempotencyKey + ':prepaid';
+    await client.query(
+      'insert into public.liverpool_cash_transactions(idempotency_key,branch_id,shift_id,type,payment_method,amount,description,performed_by) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict(idempotency_key) do nothing',
+      [transactionKey,session.branchId,shiftId || 'owner-session','gaming_revenue',method,paidAmount.toFixed(2),'دفعة مسبقة '+session.sessionNumber,auth.userId],
+    );
+  }
+
+  return { ok:true,duplicate:false,sessionId:session.id };
+}
+
+app.post('/api/sessions/start', requireAuth, requireRole('owner','admin','supervisor','cashier'), async(req,res) => {
+  const body = req.body || {};
+  if (!validIdempotency(body.idempotencyKey)) return fail(res,400,'INVALID_IDEMPOTENCY_KEY','Session idempotency key is invalid.');
+  const client = await pool?.connect().catch(()=>null);
+  if (!client) return fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.');
+  try {
+    await client.query('begin');
+    const result = await applyStartSession(client, req.auth, body, body.idempotencyKey);
+    if (!result.ok) {
+      await client.query('rollback');
+      return fail(res,result.status,result.code,result.message);
+    }
+    await client.query('commit');
+    return res.status(result.duplicate ? 200 : 201).json({ok:true,duplicate:result.duplicate,sessionId:result.sessionId});
+  } catch(e) {
+    await client.query('rollback').catch(()=>{});
+    console.error('[session:start]',e.message);
+    return fail(res,503,'SESSION_START_FAILED','Session start was not committed; retry using the same idempotency key.');
+  } finally { client.release(); }
+});
+
 app.post('/api/sync/receipts',requireAuth,requireRole('owner','admin','supervisor','cashier'),async(req,res)=>{
   const actions=req.body?.actions;
   if(!Array.isArray(actions)||actions.length<1||actions.length>100) return fail(res,400,'INVALID_BATCH','Send 1 to 100 actions.');
-  for(const a of actions){ if(!a||typeof a.idempotencyKey!=='string'||!/^[a-zA-Z0-9:_-]{8,128}$/.test(a.idempotencyKey)||typeof a.action!=='string'||a.action.length>80||!Number.isFinite(a.performedAt)||typeof a.payload==='undefined') return fail(res,400,'INVALID_ACTION','Invalid action item.'); if(Buffer.byteLength(JSON.stringify(a.payload),'utf8')>100000) return fail(res,413,'PAYLOAD_TOO_LARGE','Action payload exceeds 100 KB.'); }
-  const client=await pool?.connect().catch(()=>null); if(!client) return fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.');
-  try { await client.query('begin'); const results=[]; for(const a of actions){ const payload=JSON.stringify(a.payload); const r=await client.query(`insert into public.liverpool_sync_receipts(user_id,idempotency_key,action_type,payload,performed_at) values($1::uuid,$2,$3,$4::jsonb,to_timestamp($5/1000.0)) on conflict(user_id,idempotency_key) do nothing returning idempotency_key`,[req.auth.userId,a.idempotencyKey,a.action,payload,a.performedAt]); if(r.rowCount){ results.push({idempotencyKey:a.idempotencyKey,accepted:true,duplicate:false}); continue; } const prior=await client.query(`select 1 from public.liverpool_sync_receipts where user_id=$1::uuid and idempotency_key=$2 and action_type=$3 and payload=$4::jsonb and performed_at=to_timestamp($5/1000.0)`,[req.auth.userId,a.idempotencyKey,a.action,payload,a.performedAt]); if(!prior.rowCount){ await client.query('rollback'); return fail(res,409,'IDEMPOTENCY_KEY_REUSED','A sync idempotency key was reused with a different action payload.'); } results.push({idempotencyKey:a.idempotencyKey,accepted:true,duplicate:true}); } await client.query('commit'); res.json({ok:true,results}); }
-  catch(e){ await client.query('rollback').catch(()=>{}); console.error('[sync]',e.message); fail(res,503,'SYNC_FAILED','Batch not committed; retry safely.'); } finally { client.release(); }
+  for(const a of actions){
+    if(!a||typeof a.idempotencyKey!=='string'||!/^[a-zA-Z0-9:_-]{8,128}$/.test(a.idempotencyKey)||
+      a.idempotencyKey.length>110||typeof a.action!=='string'||a.action.length>80||
+      !Number.isFinite(a.performedAt)||typeof a.payload==='undefined') return fail(res,400,'INVALID_ACTION','Invalid action item.');
+    if(Buffer.byteLength(JSON.stringify(a.payload),'utf8')>100000) return fail(res,413,'PAYLOAD_TOO_LARGE','Action payload exceeds 100 KB.');
+    if(a.action!=='start_session') return fail(res,422,'UNSUPPORTED_OFFLINE_ACTION','This offline action has no server executor yet and will not be marked synced.');
+  }
+
+  const client=await pool?.connect().catch(()=>null);
+  if(!client) return fail(res,503,'DATABASE_UNAVAILABLE','Database unavailable.');
+  try {
+    await client.query('begin');
+    const results=[];
+    for(const action of actions){
+      const payload = JSON.stringify(action.payload);
+      const prior = await client.query(
+        'select action_type,payload,extract(epoch from performed_at)*1000 as performed_at_ms,executed_at,result from public.liverpool_sync_receipts where user_id=$1::uuid and idempotency_key=$2 for update',
+        [req.auth.userId,action.idempotencyKey],
+      );
+      let duplicate = false;
+      if(prior.rowCount){
+        const row=prior.rows[0];
+        const same=row.action_type===action.action && JSON.stringify(row.payload)===JSON.stringify(JSON.parse(payload)) &&
+          Math.abs(Number(row.performed_at_ms)-action.performedAt)<2;
+        if(!same){ await client.query('rollback'); return fail(res,409,'IDEMPOTENCY_KEY_REUSED','A sync idempotency key was reused with a different action payload.'); }
+        duplicate = true;
+        if(row.executed_at){
+          results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:true,result:row.result});
+          continue;
+        }
+      } else {
+        await client.query(
+          'insert into public.liverpool_sync_receipts(user_id,idempotency_key,action_type,payload,performed_at) values($1::uuid,$2,$3,$4::jsonb,to_timestamp($5/1000.0))',
+          [req.auth.userId,action.idempotencyKey,action.action,payload,action.performedAt],
+        );
+      }
+
+      const execution=await applyStartSession(client,req.auth,action.payload,action.idempotencyKey);
+      if(!execution.ok){
+        await client.query('rollback');
+        return fail(res,execution.status,execution.code,execution.message);
+      }
+      await client.query(
+        'update public.liverpool_sync_receipts set executed_at=coalesce(executed_at,now()),result=$3::jsonb where user_id=$1::uuid and idempotency_key=$2',
+        [req.auth.userId,action.idempotencyKey,JSON.stringify({sessionId:execution.sessionId,duplicate:execution.duplicate})],
+      );
+      results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:duplicate||execution.duplicate,result:{sessionId:execution.sessionId}});
+    }
+    await client.query('commit');
+    res.set('Cache-Control','no-store').json({ok:true,results});
+  } catch(e){
+    await client.query('rollback').catch(()=>{});
+    console.error('[sync]',e.message);
+    fail(res,503,'SYNC_FAILED','Batch not committed; retry safely.');
+  } finally { client.release(); }
 });
 
 async function resolveSupabaseUser(req) {
@@ -145,7 +355,49 @@ app.post('/api/auth/bootstrap-owner', async (req, res) => {
     } catch (e) { await client.query('rollback').catch(()=>{}); throw e; } finally { client.release(); }
   } catch (e) { console.error('[auth:bootstrap]', e.message); return fail(res, 503, 'BOOTSTRAP_FAILED', 'Owner setup could not be completed.'); }
 });
+
 app.get('/api/auth/me', requireAuth, (req,res) => res.set('Cache-Control','no-store').json({ok:true,user:req.auth}));
+
+app.get('/api/owner/profile', requireAuth, requireRole('owner'), async (req,res) => {
+  try {
+    const result=await query(
+      'select user_id,name,phone,business_name,created_at,updated_at from public.liverpool_owner_profiles where user_id=$1::uuid',
+      [req.auth.userId],
+    );
+    const row=result.rows[0];
+    res.set('Cache-Control','no-store').json({ok:true,profile:row?{
+      userId:row.user_id,name:row.name,phone:row.phone,businessName:row.business_name,
+      createdAt:row.created_at,updatedAt:row.updated_at
+    }:null});
+  } catch(e) {
+    console.error('[owner-profile:read]',e.message);
+    fail(res,503,'OWNER_PROFILE_UNAVAILABLE','Owner profile could not be loaded.');
+  }
+});
+
+app.put('/api/owner/profile', requireAuth, requireRole('owner'), async (req,res) => {
+  const body=req.body||{};
+  if(typeof body.name!=='string'||body.name.trim().length<2||body.name.trim().length>100||
+     typeof body.phone!=='string'||body.phone.trim().length>30||
+     typeof body.businessName!=='string'||body.businessName.trim().length<2||body.businessName.trim().length>160) {
+    return fail(res,400,'INVALID_OWNER_PROFILE','Owner name, phone, or business name is invalid.');
+  }
+  try {
+    const result=await query(
+      'insert into public.liverpool_owner_profiles(user_id,name,phone,business_name) values($1::uuid,$2,$3,$4) on conflict(user_id) do update set name=excluded.name,phone=excluded.phone,business_name=excluded.business_name,updated_at=now() returning user_id,name,phone,business_name,created_at,updated_at',
+      [req.auth.userId,body.name.trim(),body.phone.trim(),body.businessName.trim()],
+    );
+    const row=result.rows[0];
+    res.set('Cache-Control','no-store').json({ok:true,profile:{
+      userId:row.user_id,name:row.name,phone:row.phone,businessName:row.business_name,
+      createdAt:row.created_at,updatedAt:row.updated_at
+    }});
+  } catch(e) {
+    console.error('[owner-profile:write]',e.message);
+    fail(res,503,'OWNER_PROFILE_SAVE_FAILED','Owner profile could not be saved.');
+  }
+});
+
 
  
 // Owner-managed Supabase memberships. Staff are assigned to exactly one branch.
