@@ -14,11 +14,8 @@ const BRANCH_SCOPED_ARRAY_STATE_KEYS = new Set([
 ]);
 const STAFF_STATE_WRITERS = {
   lg_devices: new Set(['supervisor', 'technician']),
-  lg_sessions: new Set(['supervisor', 'cashier']),
   lg_waitlist: new Set(['supervisor', 'cashier']),
   lg_shifts: new Set(['supervisor', 'cashier']),
-  lg_active_shift_id: new Set(['supervisor', 'cashier']),
-  lg_notifications: new Set(['supervisor', 'cashier', 'technician']),
 };
 
 function canWriteBranchScopedState(role, key) {
@@ -131,8 +128,11 @@ function scopeOperationalState(state, branchId) {
       : [];
   }
 
-  const assignedShiftExists = scoped.lg_shifts.some((shift) => shift.id === state.lg_active_shift_id);
-  scoped.lg_active_shift_id = assignedShiftExists ? state.lg_active_shift_id : null;
+  const assignedShift = scoped.lg_shifts.find((shift) => shift.id === state.lg_active_shift_id);
+  const openShift = scoped.lg_shifts.find((shift) => shift.status === 'open');
+  // A global scalar cannot represent each branch's active shift. For staff reads,
+  // derive it from that branch's shifts and never expose another branch's identifier.
+  scoped.lg_active_shift_id = assignedShift?.id || openShift?.id || null;
 
   // Notifications without an explicit branch assignment are not exposed to branch staff.
   scoped.lg_notifications = Array.isArray(state.lg_notifications)
