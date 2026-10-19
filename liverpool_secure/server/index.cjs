@@ -309,8 +309,8 @@ app.post('/api/sync/receipts',requireAuth,requireRole('owner','admin','superviso
 
       let execution;
       if(action.action==='start_session') execution=await applyStartSession(client,req.auth,action.payload,action.idempotencyKey);
-      else if(action.action==='complete_session') execution=await sessionFinance.applyCompleteSession(client,req.auth,{...(action.payload||{}),idempotencyKey:action.idempotencyKey});
-      else execution=await sessionFinance.applyDebtPayment(client,req.auth,{...(action.payload||{}),idempotencyKey:action.idempotencyKey});
+      else if(action.action==='complete_session') execution=await sessionFinance.applyCompleteSession(client,req.auth,{...(action.payload||{}),idempotencyKey:action.payload?.idempotencyKey||action.idempotencyKey});
+      else execution=await sessionFinance.applyDebtPayment(client,req.auth,{...(action.payload||{}),idempotencyKey:action.payload?.idempotencyKey||action.idempotencyKey});
       if(!execution.ok){
         await client.query('rollback');
         return fail(res,execution.status,execution.code,execution.message);
