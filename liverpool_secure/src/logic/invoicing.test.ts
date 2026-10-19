@@ -140,3 +140,78 @@ test('Test 6: Idempotent invoice checkout prevents double-click duplicate safe t
   assert.equal(secondAttempt.processed, false, 'Double-click duplicate must be blocked');
   assert.equal(secondAttempt.reason, 'Duplicate submission blocked');
 });
+
+
+test('Overpayment records only the amount due and returns the remainder as change', () => {
+  const result = calculateInvoice({
+    gamingTotal: 80,
+    productsTotal: 20,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 0,
+    amountReceived: 120,
+    paymentMethod: 'cash',
+  });
+
+  assert.equal(result.netGrandTotal, 100);
+  assert.equal(result.actualCollected, 100);
+  assert.equal(result.changeGiven, 20);
+  assert.equal(result.remainingDebt, 0);
+  assert.equal(result.paymentStatus, 'overpaid');
+  assert.equal(result.safeAllocations.length, 1);
+  assert.equal(result.safeAllocations[0].amount, 100);
+});
+
+test('Prepaid amount reduces the balance due without being collected twice', () => {
+  const result = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 25,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 40,
+    amountReceived: 60,
+    paymentMethod: 'cash',
+  });
+
+  assert.equal(result.grossTotal, 125);
+  assert.equal(result.effectiveBalanceDue, 85);
+  assert.equal(result.actualCollected, 60);
+  assert.equal(result.remainingDebt, 25);
+  assert.equal(result.safeAllocations.reduce((sum, item) => sum + item.amount, 0), 60);
+});
+
+test('Percentage and fixed discounts cannot reduce invoice below zero', () => {
+  const percentage = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 50,
+    discountType: 'percent',
+    discountValue: 150,
+    prepaidAmount: 0,
+    amountReceived: 0,
+  });
+  const fixed = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 50,
+    discountType: 'fixed',
+    discountValue: 999,
+    prepaidAmount: 0,
+    amountReceived: 0,
+  });
+
+  assert.equal(percentage.discountAmount, 150);
+  assert.equal(percentage.netGrandTotal, 0);
+  assert.equal(fixed.discountAmount, 150);
+  assert.equal(fixed.netGrandTotal, 0);
+});
+
+test('Debt settlement caps collected amount at debt and returns excess as change', () => {
+  const result = settleDebtPayment(35, 50, 'instapay');
+
+  assert.equal(result.collectedAmount, 35);
+  assert.equal(result.newRemainingDebt, 0);
+  assert.equal(result.changeGiven, 15);
+  assert.equal(result.isFullySettled, true);
+  assert.equal(result.safeTransaction.type, 'debt_collection');
+  assert.equal(result.safeTransaction.amount, 35);
+  assert.equal(result.safeTransaction.paymentMethod, 'instapay');
+});
