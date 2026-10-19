@@ -146,21 +146,24 @@ async function loadLockedState(client, keys) {
     'select state_key,state_value,version from public.liverpool_app_state where state_key = any($1::text[]) order by state_key for update',
     [keys],
   );
-  return Object.fromEntries(result.rows.map(row => [row.state_key, row.state_value]));
+  const state = Object.fromEntries(result.rows.map(row => [row.state_key, row.state_value]));
+  state.__versions = Object.fromEntries(result.rows.map(row => [row.state_key, Number(row.version)]));
+  return state;
 }
 
 async function writeStateValue(client, key, value, userId) {
-  await client.query(
-    'insert into public.liverpool_app_state(state_key,state_value,version,updated_at,updated_by) values($1,$2::jsonb,1,now(),$3::uuid) on conflict(state_key) do update set state_value=excluded.state_value,version=public.liverpool_app_state.version+1,updated_at=now(),updated_by=excluded.updated_by',
+  const saved = await client.query(
+    'insert into public.liverpool_app_state(state_key,state_value,version,updated_at,updated_by) values($1,$2::jsonb,1,now(),$3::uuid) on conflict(state_key) do update set state_value=excluded.state_value,version=public.liverpool_app_state.version+1,updated_at=now(),updated_by=excluded.updated_by returning version',
     [key, JSON.stringify(value), userId],
   );
+  return Number(saved.rows[0].version);
 }
 
 async function applyStartSession(client, auth, payload, idempotencyKey) {
   const session = payload && typeof payload === 'object' && payload.session && typeof payload.session === 'object'
     ? payload.session
     : payload;
-  const shiftId = payload && typeof payload === 'object' && typeof payload.shiftId === 'string'
+  let shiftId = payload && typeof payload === 'object' && typeof payload.shiftId === 'string'
     ? payload.shiftId
     : '';
 
@@ -195,7 +198,7 @@ async function applyStartSession(client, auth, payload, idempotencyKey) {
     if (!same || priorSession.status !== 'active') {
       return { ok:false,status:409,code:'SESSION_ID_CONFLICT',message:'This session identifier already belongs to another session.' };
     }
-    return { ok:true,duplicate:true,sessionId:session.id };
+    return { ok:true,duplicate:true,sessionId:session.id,versions:{lg_sessions:state.__versions?.lg_sessions,lg_devices:state.__versions?.lg_devices} };
   }
 
   const device = devices.find(item => item && item.id === session.deviceId);
@@ -205,6 +208,9 @@ async function applyStartSession(client, auth, payload, idempotencyKey) {
 
   if (!isManagementRole(auth.role)) {
     const shifts = Array.isArray(state.lg_shifts) ? state.lg_shifts : [];
+    if (!shiftId) {
+      shiftId = shifts.find(item => item && item.branchId === session.branchId && item.status === 'open')?.id || '';
+    }
     const activeShift = shifts.find(item => item && item.id === shiftId && item.branchId === session.branchId && item.status === 'open');
     if (!activeShift) return { ok:false,status:409,code:'OPEN_SHIFT_REQUIRED',message:'An open shift for this branch is required before starting a session.' };
   }
@@ -223,8 +229,8 @@ async function applyStartSession(client, auth, payload, idempotencyKey) {
       : item);
   const nextDevices = mergeBranchScopedArray(devices, nextDevicesForBranch, session.branchId, 'lg_devices');
 
-  await writeStateValue(client, 'lg_sessions', nextSessions, auth.userId);
-  await writeStateValue(client, 'lg_devices', nextDevices, auth.userId);
+  const sessionsVersion = await writeStateValue(client, 'lg_sessions', nextSessions, auth.userId);
+  const devicesVersion = await writeStateValue(client, 'lg_devices', nextDevices, auth.userId);
 
   const paidAmount = Number(session.paidAmount || 0);
   if (session.isPrepaid === true && Number.isFinite(paidAmount) && paidAmount > 0) {
@@ -237,7 +243,7 @@ async function applyStartSession(client, auth, payload, idempotencyKey) {
     );
   }
 
-  return { ok:true,duplicate:false,sessionId:session.id };
+  return { ok:true,duplicate:false,sessionId:session.id,versions:{lg_sessions:sessionsVersion,lg_devices:devicesVersion} };
 }
 
 app.post('/api/sessions/start', requireAuth, requireRole('owner','admin','supervisor','cashier'), async(req,res) => {
@@ -253,7 +259,7 @@ app.post('/api/sessions/start', requireAuth, requireRole('owner','admin','superv
       return fail(res,result.status,result.code,result.message);
     }
     await client.query('commit');
-    return res.status(result.duplicate ? 200 : 201).json({ok:true,duplicate:result.duplicate,sessionId:result.sessionId});
+    return res.status(result.duplicate ? 200 : 201).json({ok:true,duplicate:result.duplicate,sessionId:result.sessionId,versions:result.versions || {}});
   } catch(e) {
     await client.query('rollback').catch(()=>{});
     console.error('[session:start]',e.message);
@@ -280,18 +286,18 @@ app.post('/api/sync/receipts',requireAuth,requireRole('owner','admin','superviso
     for(const action of actions){
       const payload = JSON.stringify(action.payload);
       const prior = await client.query(
-        'select action_type,payload,extract(epoch from performed_at)*1000 as performed_at_ms,executed_at,result from public.liverpool_sync_receipts where user_id=$1::uuid and idempotency_key=$2 for update',
-        [req.auth.userId,action.idempotencyKey],
+        'select action_type,(payload=$3::jsonb) as payload_matches,extract(epoch from performed_at)*1000 as performed_at_ms,executed_at,result from public.liverpool_sync_receipts where user_id=$1::uuid and idempotency_key=$2 for update',
+        [req.auth.userId,action.idempotencyKey,payload],
       );
       let duplicate = false;
       if(prior.rowCount){
         const row=prior.rows[0];
-        const same=row.action_type===action.action && JSON.stringify(row.payload)===JSON.stringify(JSON.parse(payload)) &&
+        const same=row.action_type===action.action && row.payload_matches === true &&
           Math.abs(Number(row.performed_at_ms)-action.performedAt)<2;
         if(!same){ await client.query('rollback'); return fail(res,409,'IDEMPOTENCY_KEY_REUSED','A sync idempotency key was reused with a different action payload.'); }
         duplicate = true;
         if(row.executed_at){
-          results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:true,result:row.result});
+          results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:true,result:row.result,versions:row.result?.versions || {}});
           continue;
         }
       } else {
@@ -308,9 +314,9 @@ app.post('/api/sync/receipts',requireAuth,requireRole('owner','admin','superviso
       }
       await client.query(
         'update public.liverpool_sync_receipts set executed_at=coalesce(executed_at,now()),result=$3::jsonb where user_id=$1::uuid and idempotency_key=$2',
-        [req.auth.userId,action.idempotencyKey,JSON.stringify({sessionId:execution.sessionId,duplicate:execution.duplicate})],
+        [req.auth.userId,action.idempotencyKey,JSON.stringify({sessionId:execution.sessionId,duplicate:execution.duplicate,versions:execution.versions || {}})],
       );
-      results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:duplicate||execution.duplicate,result:{sessionId:execution.sessionId}});
+      results.push({idempotencyKey:action.idempotencyKey,accepted:true,executed:true,duplicate:duplicate||execution.duplicate,result:{sessionId:execution.sessionId},versions:execution.versions || {}});
     }
     await client.query('commit');
     res.set('Cache-Control','no-store').json({ok:true,results});
