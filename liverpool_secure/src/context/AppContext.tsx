@@ -418,6 +418,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return payload as T;
   }, [apiHeaders]);
 
+  // Notification helper
+  const addNotification = useCallback((data: Omit<SystemNotification, 'id' | 'timestamp' | 'isRead'>) => {
+    const notif: SystemNotification = {
+      id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: Date.now(),
+      isRead: false,
+      ...data,
+    };
+    setNotifications(prev => [notif, ...prev]);
+  }, []);
+
+  const markNotificationRead = useCallback((id: string) => {
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
+  }, []);
+
+  const clearAllNotifications = useCallback(() => {
+    setNotifications([]);
+  }, []);
+
   const persistState = useCallback(<T,>(key: string, value: T) => {
     saveLocal(key, value);
     if (!cloudHydratedRef.current || !CLOUD_STATE_KEYS.includes(key as typeof CLOUD_STATE_KEYS[number])) return;
@@ -536,25 +555,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!activeShiftId) return null;
     return shifts.find(s => s.id === activeShiftId && s.status === 'open') || null;
   }, [shifts, activeShiftId]);
-
-  // Notification helper
-  const addNotification = useCallback((data: Omit<SystemNotification, 'id' | 'timestamp' | 'isRead'>) => {
-    const notif: SystemNotification = {
-      id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      timestamp: Date.now(),
-      isRead: false,
-      ...data,
-    };
-    setNotifications(prev => [notif, ...prev]);
-  }, []);
-
-  const markNotificationRead = useCallback((id: string) => {
-    setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
-  }, []);
-
-  const clearAllNotifications = useCallback(() => {
-    setNotifications([]);
-  }, []);
 
   // Audit logging helper
   const recordAudit = useCallback((
