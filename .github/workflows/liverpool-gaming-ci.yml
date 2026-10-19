@@ -1,0 +1,46 @@
+name: Liverpool Gaming CI
+
+on:
+  pull_request:
+    paths:
+      - "liverpool_secure/**"
+      - ".github/workflows/liverpool-gaming-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "liverpool_secure/**"
+      - ".github/workflows/liverpool-gaming-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liverpool-gaming-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Typecheck, tests, and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: liverpool_secure
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: liverpool_secure/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: TypeScript check
+        run: npm run lint
+      - name: Run unit tests
+        run: npm test
+      - name: Build production frontend
+        run: npm run build
