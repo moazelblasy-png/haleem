@@ -36,11 +36,18 @@ export interface InvoiceCalculationResult {
 }
 
 /**
+ * Monetary input ceiling prevents finite-but-extreme numbers from overflowing
+ * sums and rounding operations. Values above this business-safe ceiling are
+ * clamped before any invoice arithmetic is performed.
+ */
+const MAX_MONEY_AMOUNT = 1_000_000_000_000;
+
+/**
  * Calculates a complete invoice with strict validation of collected amounts,
  * partial payments, and split payment methods.
  */
 function nonNegativeFinite(value: number): number {
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
+  return Number.isFinite(value) ? Math.min(MAX_MONEY_AMOUNT, Math.max(0, value)) : 0;
 }
 
 const PAYMENT_METHODS = new Set(['cash', 'instapay', 'vodafone', 'card']);
