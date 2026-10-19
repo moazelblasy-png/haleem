@@ -5,6 +5,7 @@
  */
 
 import { Device, GameSession, DeviceType, SessionTransferRecord, SessionSegment, PriceTier } from '../types';
+import { newRuntimeId } from '../utils/runtime';
 
 export interface TransferValidationResult {
   isValid: boolean;
@@ -114,7 +115,7 @@ export function executeSessionTransfer(
   }
 
   const transferRecord: SessionTransferRecord = {
-    id: `xfer-${nowMs}-${Math.random().toString(36).substring(2, 6)}`,
+    id: newRuntimeId('xfer'),
     fromDeviceId: fromDevice.id,
     fromScreenNumber: fromDevice.screenNumber,
     fromDeviceType: fromDevice.type,

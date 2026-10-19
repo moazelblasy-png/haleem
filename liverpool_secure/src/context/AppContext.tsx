@@ -37,6 +37,7 @@ import {
 import { calculateInvoice, settleDebtPayment } from '../logic/invoicing';
 import { validateSessionTransfer, executeSessionTransfer } from '../logic/transfer';
 import { hashPinOrPassword, verifyPinOrPassword } from '../utils/security';
+import { localDateKey, newRuntimeId } from '../utils/runtime';
 import { calculateShiftClosing, HandoverChecklist } from '../logic/shift';
 import {
   playFiveMinuteWarningSound,
@@ -447,7 +448,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Notification helper
   const addNotification = useCallback((data: Omit<SystemNotification, 'id' | 'timestamp' | 'isRead'>) => {
     const notif: SystemNotification = {
-      id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: newRuntimeId('notif'),
       timestamp: Date.now(),
       isRead: false,
       ...data,
@@ -589,7 +590,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     meta?: { oldValue?: string; newValue?: string; deviceOrSessionRef?: string }
   ) => {
     const entry: AuditLogEntry = {
-      id: `audit-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      id: newRuntimeId('audit'),
       timestamp: Date.now(),
       userId: currentUser?.id || 'system',
       userName: currentUser?.name || 'النظام',
@@ -607,8 +608,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Offline queue registration
   const queueOfflineAction = useCallback((action: string, payload: any) => {
     const item: OfflineAction = {
-      id: `offline-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      idempotencyKey: `idem-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      id: newRuntimeId('offline'),
+      idempotencyKey: newRuntimeId('idem'),
       action,
       payload,
       performedBy: currentUser?.name || 'مستخدم',
@@ -929,7 +930,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addDevice = useCallback((data: Omit<Device, 'id' | 'status'>): Device => {
     const newDevice: Device = {
       ...data,
-      id: `dev-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: newRuntimeId('dev'),
       status: 'available',
     };
     setDevices(prev => [...prev, newDevice]);
@@ -976,7 +977,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (dev.status !== 'available') throw new Error('لا يمكن بدء جلسة على جهاز غير متاح');
 
     const now = Date.now();
-    const sessionNum = `#S${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
+    const sessionNum = `#S${localDateKey(now).replace(/-/g, '').slice(2)}-${newRuntimeId('session').slice(-8)}`;
 
     const initialSegment = {
       id: `seg-${now}-1`,
@@ -1080,7 +1081,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } : i));
 
     const productRecord = {
-      id: `sp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: newRuntimeId('sp'),
       productId: item.id,
       name: item.name,
       quantity,
@@ -1369,7 +1370,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Inventory & Bar
   // --------------------------------------------------------------------------
   const addInventoryItem = useCallback(async (data: Omit<InventoryItem, 'id'>): Promise<InventoryItem> => {
-    const newItem: InventoryItem = { ...data, id: `inv-${Date.now()}-${Math.random().toString(36).substring(2, 8)}` };
+    const newItem: InventoryItem = { ...data, id: newRuntimeId('inv') };
     const result = await apiRequest<{ item: any }>('/api/inventory/items', { method: 'POST', body: JSON.stringify({ id: newItem.id, branchId: newItem.branchId, name: newItem.name, category: newItem.category, sellingPrice: newItem.sellingPrice, costPrice: newItem.costPrice, stockQuantity: newItem.stockQuantity, minStockThreshold: newItem.minStockThreshold }) });
     const saved: InventoryItem = { ...newItem, id: String(result.item.id), stockQuantity: Number(result.item.stock_quantity), sellingPrice: Number(result.item.selling_price), costPrice: Number(result.item.cost_price) };
     setInventory(prev => [...prev.filter(i => i.id !== saved.id), saved]);
@@ -1555,7 +1556,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newEmp: Employee = {
       ...data,
       id: `emp-${Date.now()}`,
-      joinedDate: new Date().toISOString().slice(0, 10),
+      joinedDate: localDateKey(),
       overtimeRequests: [],
       advanceRequests: [],
       attendanceLogs: [],
@@ -1625,7 +1626,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `ded-${Date.now()}`,
       amount,
       reason,
-      date: new Date().toISOString().slice(0, 10),
+      date: localDateKey(),
       createdBy: currentUser?.name || 'المالك',
       createdAt: Date.now(),
     };
@@ -1651,7 +1652,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const requestLeave = useCallback((employeeId: string, daysCount: number, reason: string) => {
     const req: LeaveRequest = {
       id: `leave-${Date.now()}`,
-      date: new Date().toISOString().slice(0, 10),
+      date: localDateKey(),
       daysCount,
       reason,
       status: 'pending',
@@ -1697,7 +1698,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (e.id !== employeeId) return e;
       const newReq = {
         id: `ot-${Date.now()}`,
-        date: new Date().toISOString().slice(0, 10),
+        date: localDateKey(),
         hours,
         hourlyRate,
         reason,
@@ -1733,7 +1734,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [currentUser, recordAudit]);
 
   const recordAttendance = useCallback((employeeId: string, status: 'present' | 'absent' | 'late' | 'excused', delayMinutes = 0) => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateKey();
     setEmployees(prev => prev.map(e => {
       if (e.id !== employeeId) return e;
       const existing = e.attendanceLogs.find(a => a.date === today);
@@ -1752,7 +1753,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const clockInEmployee = useCallback((employeeId: string) => {
     const now = Date.now();
-    const today = new Date(now).toISOString().slice(0, 10);
+    const today = localDateKey(now);
     const employee = employees.find(e => e.id === employeeId);
     if (!employee) return;
     setEmployees(prev => prev.map(e => {
@@ -1772,7 +1773,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const clockOutEmployee = useCallback((employeeId: string) => {
     const now = Date.now();
-    const today = new Date(now).toISOString().slice(0, 10);
+    const today = localDateKey(now);
     const employee = employees.find(e => e.id === employeeId);
     if (!employee) return;
     setEmployees(prev => prev.map(e => {

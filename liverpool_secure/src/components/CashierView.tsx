@@ -18,6 +18,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { playCashSound, playClickSound } from '../utils/sound';
+import { newRuntimeId } from '../utils/runtime';
 
 interface CashierViewProps {
   initialSessionToCheckout?: GameSession | null;
@@ -155,7 +156,7 @@ export const CashierView: React.FC<CashierViewProps> = ({
       return [
         ...prev,
         {
-          id: `item-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
+          id: newRuntimeId('item'),
           productId: product.id,
           name: product.name,
           quantity: 1,
