@@ -17,6 +17,7 @@ import { ShiftHandoverView } from './components/ShiftHandoverView';
 import { EmployeesView } from './components/EmployeesView';
 import { ReportsView } from './components/ReportsView';
 import { PricingSettingsView } from './components/PricingSettingsView';
+import { BranchAccessView } from './components/BranchAccessView';
 import { StartSessionModal } from './components/StartSessionModal';
 import { SessionDetailModal } from './components/SessionDetailModal';
 import { TransferSessionModal } from './components/TransferSessionModal';
@@ -157,6 +158,7 @@ const MainLayout: React.FC = () => {
           {activeView === 'employees' && <EmployeesView />}
           {activeView === 'reports' && <ReportsView />}
           {activeView === 'settings' && <PricingSettingsView />}
+          {activeView === 'branchAccess' && <BranchAccessView />}
         </main>
       </div>
 
