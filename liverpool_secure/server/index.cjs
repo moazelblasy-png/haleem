@@ -306,6 +306,13 @@ app.post('/api/finance/cash-transactions', requireAuth, requireRole('owner','adm
 
 app.use((err,_req,res,_next)=>{ if(err?.type==='entity.too.large') return fail(res,413,'BODY_TOO_LARGE','Request body too large.'); if(err instanceof SyntaxError) return fail(res,400,'INVALID_JSON','Invalid JSON body.'); console.error('[http]',err?.message||err); fail(res,500,'INTERNAL_ERROR','Unexpected server error.'); });
 if(fs.existsSync(distDir)){ app.use(express.static(distDir,{index:'index.html',etag:true,maxAge:'1h'})); app.get('*',(req,res,next)=>req.path.startsWith('/api/')?next():res.sendFile(path.join(distDir,'index.html'))); } else app.get('/',(_req,res)=>res.status(503).send('Application has not been built yet.'));
-const server=app.listen(port,'0.0.0.0',()=>console.log(`[web] listening on 0.0.0.0:${port}`));
-async function shutdown(signal){ console.log(`[web] ${signal}; shutting down`); server.close(async()=>{await pool?.end().catch(()=>{});process.exit(0);}); }
-process.on('SIGTERM',()=>shutdown('SIGTERM')); process.on('SIGINT',()=>shutdown('SIGINT'));
+
+// Vercel imports this Express app as a serverless function. Only start a listening
+// socket when this module is executed directly (for local Docker/Node deployments).
+if (require.main === module) {
+  const server=app.listen(port,'0.0.0.0',()=>console.log(`[web] listening on 0.0.0.0:${port}`));
+  async function shutdown(signal){ console.log(`[web] ${signal}; shutting down`); server.close(async()=>{await pool?.end().catch(()=>{});process.exit(0);}); }
+  process.on('SIGTERM',()=>shutdown('SIGTERM')); process.on('SIGINT',()=>shutdown('SIGINT'));
+}
+
+module.exports = app;
