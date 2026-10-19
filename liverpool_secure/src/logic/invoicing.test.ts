@@ -285,3 +285,21 @@ test('Extremely large finite amounts are bounded before invoice arithmetic', () 
   assert.ok(Number.isFinite(result.grossTotal));
   assert.ok(result.safeAllocations.every((item) => Number.isFinite(item.amount)));
 });
+
+
+test('Malformed split-payment entries are ignored instead of crashing invoice calculation', () => {
+  const malformed = [null, undefined, { method: 'cash' }] as unknown as NonNullable<Parameters<typeof calculateInvoice>[0]['splitPayments']>;
+  const result = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 0,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 0,
+    amountReceived: 100,
+    splitPayments: malformed,
+  });
+
+  assert.equal(result.actualCollected, 0);
+  assert.equal(result.remainingDebt, 100);
+  assert.equal(result.safeAllocations.length, 0);
+});
