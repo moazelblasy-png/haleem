@@ -17,7 +17,7 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-اترك `SUPABASE_URL` و`SUPABASE_PUBLISHABLE_KEY` و`VITE_SUPABASE_URL` و`VITE_SUPABASE_PUBLISHABLE_KEY` كما هي إذا كانت تخص مشروع Liverpool Gaming الصحيح. غيّر `OWNER_BOOTSTRAP_CODE` إلى سر عشوائي طويل (32 حرفًا على الأقل)، واحتفظ به لنفسك؛ ستدخله مرة واحدة في شاشة إنشاء حساب المالك. يجب إدخال `DATABASE_URL` من Supabase Dashboard > Project Settings > Database > Connection string. استخدم بيانات اتصال الخادم فقط، ولا تضع كلمة مرور قاعدة البيانات في أي متغير يبدأ بـ `VITE_` ولا ترفع ملف `.env` إلى Git.
+اترك `SUPABASE_URL` و`SUPABASE_PUBLISHABLE_KEY` و`VITE_SUPABASE_URL` و`VITE_SUPABASE_PUBLISHABLE_KEY` كما هي إذا كانت تخص مشروع Liverpool Gaming الصحيح. قيمة `OWNER_BOOTSTRAP_CODE` في هذا الملف مجرد خانة توضيحية وليست رمزًا جاهزًا ولا تعني أنها القيمة المستخدمة في الموقع المنشور. أنشئ سرًا عشوائيًا فريدًا بطول 32 حرفًا أو أكثر، وضع القيمة نفسها في متغير الخادم `OWNER_BOOTSTRAP_CODE` داخل إعدادات Environment Variables في مشروع Vercel للبيئة المطلوبة، ثم أدخلها في شاشة إنشاء حساب المالك مرة واحدة. لا تستخدم قيمة منشورة في المستودع كسر حقيقي. يجب إدخال `DATABASE_URL` من Supabase Dashboard > Project Settings > Database > Connection string. استخدم بيانات اتصال الخادم فقط، ولا تضع كلمة مرور قاعدة البيانات في أي متغير يبدأ بـ `VITE_` ولا ترفع ملف `.env` إلى Git.
 
 إذا كان الاتصال المباشر غير متاح في بيئة الاستضافة، استخدم connection string المناسب من Supabase (Pooler) مع المنفذ/وضع الاتصال المعروض في لوحة التحكم. لا تخمّن كلمة المرور أو عنوان المضيف.
 
