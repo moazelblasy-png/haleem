@@ -251,6 +251,7 @@ interface AppContextType {
   updateSupabaseConfig: (config: Partial<SupabaseConfig>) => void;
   setupPrimaryOwner: (ownerData: { name: string; phone: string; pinOrPassword: string; enable2FA?: boolean }) => boolean;
   registerOwnerAccount: (data: { name: string; phone: string; email: string; password: string; bootstrapCode: string }) => Promise<{ success: boolean; message: string; requiresEmailConfirmation?: boolean }>;
+  resendOwnerConfirmation: (email: string) => Promise<{ success: boolean; message: string }>;
   loginWithSupabase: (email: string, password: string) => Promise<{ success: boolean; message: string }>;
   loginUser: (phone: string, pin: string) => { success: boolean; message: string; requires2FA?: boolean };
   verify2FACode: (code: string) => boolean;
@@ -424,6 +425,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     return payload;
   }, []);
+
+  const resendOwnerConfirmation = useCallback(async (email: string): Promise<{ success: boolean; message: string }> => {
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) return { success: false, message: 'أدخل البريد الإلكتروني أولًا.' };
+    try {
+      await supabaseAuthRequest('resend', { type: 'signup', email: normalizedEmail });
+      return { success: true, message: 'تم طلب إعادة إرسال رسالة التأكيد. راجع البريد الوارد ومجلد Spam.' };
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : 'تعذر إعادة إرسال رسالة التأكيد.' };
+    }
+  }, [supabaseAuthRequest]);
 
   const apiRequest = useCallback(async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
     const response = await fetch(path, { ...init, headers: apiHeaders({ 'Content-Type': 'application/json', ...((init.headers || {}) as Record<string, string>) }) });
