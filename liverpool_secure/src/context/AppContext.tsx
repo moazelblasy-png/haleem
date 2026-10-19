@@ -666,16 +666,65 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!response.ok || result.ok !== true) throw new Error(result?.error?.message || 'Sync failed');
       const executedResults = (result.results || []).filter((x: any) => x.accepted && x.executed === true);
       const accepted = new Set(executedResults.map((x: any) => x.idempotencyKey));
+      if (accepted.size !== pending.length) throw new Error('Some queued actions have not been executed by the server.');
+      const syncedSessionIds = new Set<string>();
+      const transactionsToAdd: SafeTransaction[] = [];
+
       for (const item of executedResults) {
         if (item.versions && typeof item.versions === 'object') Object.assign(cloudVersionsRef.current, item.versions);
+        const remote = item.result || {};
+        const session = remote.session as GameSession | null;
+        if (session && typeof session.id === 'string') {
+          syncedSessionIds.add(session.id);
+          setSessions(prev => prev.some(existing => existing.id === session.id)
+            ? prev.map(existing => existing.id === session.id ? session : existing)
+            : [session, ...prev]);
+          setDevices(prev => prev.map(device => device.id !== session.deviceId ? device : session.status === 'active'
+            ? { ...device, status: 'busy', currentGame: session.gameName, activeSessionId: session.id }
+            : { ...device, status: 'available', currentGame: undefined, activeSessionId: undefined }));
+        }
+
+        const queued = pending.find(action => (action.idempotencyKey || action.id) === item.idempotencyKey);
+        const queuedShiftId = typeof queued?.payload?.shiftId === 'string' ? queued.payload.shiftId : (activeShiftId || 'offline-sync');
+        const queuedBranchId = session?.branchId || queued?.payload?.completedSession?.branchId || currentUser?.id || '';
+        const remoteTransactions = Array.isArray(remote.transactions) ? remote.transactions : remote.transaction ? [remote.transaction] : [];
+        for (const tx of remoteTransactions) {
+          if (!tx || typeof tx.id !== 'string') continue;
+          transactionsToAdd.push({
+            id: tx.id,
+            shiftId: queuedShiftId,
+            branchId: queuedBranchId,
+            type: tx.type as SafeTransaction['type'],
+            amount: Number(tx.amount),
+            paymentMethod: tx.payment_method as SafeTransaction['paymentMethod'],
+            description: String(tx.description || ''),
+            performedBy: currentUser?.name || 'كاشير',
+            timestamp: Date.parse(tx.created_at) || Date.now(),
+          });
+        }
       }
-      if (accepted.size !== pending.length) throw new Error('Some queued actions have not been executed by the server.');
+
+      if (transactionsToAdd.length || syncedSessionIds.size) {
+        const incomingIds = new Set(transactionsToAdd.map(tx => tx.id));
+        setSafeTransactions(prev => {
+          const withoutPendingCopies = prev.filter(tx => {
+            for (const sessionId of syncedSessionIds) {
+              if (tx.id.startsWith('pending-session-' + sessionId + '-') || tx.id.startsWith('pending-debt-' + sessionId + '-')) return false;
+            }
+            return !incomingIds.has(tx.id);
+          });
+          return [...transactionsToAdd, ...withoutPendingCopies];
+        });
+      }
+
       setOfflineQueue(prev => prev.map(item => accepted.has(item.idempotencyKey || item.id) ? { ...item, status: 'synced' } : item));
       addNotification({ title: 'تم تنفيذ العمليات المتأخرة', message: 'تم تنفيذ ' + accepted.size + ' عملية على الخادم وتأكيد حفظها.', type: 'success' });
-    }).catch(() => addNotification({ title: 'فشلت المزامنة', message: 'لم يؤكد الخادم حفظ العمليات؛ ستظل معلقة ويمكن إعادة المحاولة.', type: 'warning' }));
-  }, [offlineQueue, addNotification, getSupabaseAccessToken, apiHeaders]);
-
-  // --------------------------------------------------------------------------
+    }).catch((error) => addNotification({
+      title: 'فشلت المزامنة',
+      message: error instanceof Error ? error.message : 'لم يؤكد الخادم حفظ العمليات؛ ستظل معلقة ويمكن إعادة المحاولة.',
+      type: 'warning',
+    }));
+  }, [offlineQueue, addNotification, getSupabaseAccessToken, apiHeaders, activeShiftId, currentUser]);  // --------------------------------------------------------------------------
   // REAL-TIME SESSION MONITOR & AUDIO ALARMS (User requirement: 5-min warning,
   // session finished alarm, and periodic overdue buzzer!)
   // --------------------------------------------------------------------------
@@ -1436,7 +1485,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
     setSafeTransactions(prev => {
       const incomingIds = new Set(transactionsToAdd.map(tx => tx.id));
-      return [...transactionsToAdd.filter(tx => !incomingIds.has(tx.id) && !prev.some(old => old.id === tx.id)), ...prev.filter(old => !incomingIds.has(old.id))];
+      return [...transactionsToAdd.filter(tx => !prev.some(old => old.id === tx.id)), ...prev.filter(old => !incomingIds.has(old.id))];
     });
 
     if (queuedForSync) addNotification({
