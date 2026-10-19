@@ -76,12 +76,21 @@ export function calculateInvoice(input: InvoiceCalculationInput): InvoiceCalcula
 
   // Treat runtime payloads defensively: malformed split entries must not crash checkout.
   const splitPayments = Array.isArray(input.splitPayments)
-    ? input.splitPayments.filter((portion): portion is SplitPaymentPortion => Boolean(portion && typeof portion === 'object'))
+    ? input.splitPayments.filter((portion): portion is SplitPaymentPortion =>
+        Boolean(
+          portion &&
+          typeof portion === 'object' &&
+          typeof (portion as SplitPaymentPortion).method === 'string' &&
+          PAYMENT_METHODS.has((portion as SplitPaymentPortion).method) &&
+          Number.isFinite((portion as SplitPaymentPortion).amount) &&
+          (portion as SplitPaymentPortion).amount > 0
+        )
+      )
     : [];
 
   // If the caller supplied split-payment entries, never fall back to amountReceived
-  // when every entry is malformed. Doing so could mark a split invoice paid without a
-  // valid payment allocation. A partially valid list uses only its valid entries.
+  // when every entry is malformed. Only known methods with finite positive amounts
+  // count as valid allocations; unknown methods must not silently become cash.
   const hasSplitPaymentInput = Array.isArray(input.splitPayments) && input.splitPayments.length > 0;
   let totalReceived = nonNegativeFinite(input.amountReceived);
 
