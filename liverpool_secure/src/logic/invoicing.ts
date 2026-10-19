@@ -74,12 +74,17 @@ export function calculateInvoice(input: InvoiceCalculationInput): InvoiceCalcula
   const prepaid = nonNegativeFinite(input.prepaidAmount);
   const effectiveBalanceDue = Math.max(0, netGrandTotal - prepaid);
 
+  // Treat runtime payloads defensively: malformed split entries must not crash checkout.
+  const splitPayments = Array.isArray(input.splitPayments)
+    ? input.splitPayments.filter((portion): portion is SplitPaymentPortion => Boolean(portion && typeof portion === 'object'))
+    : [];
+
   // Validate received amount
   let totalReceived = nonNegativeFinite(input.amountReceived);
   
   // If split payments are provided, ensure total received matches the split portions
-  if (input.splitPayments && input.splitPayments.length > 0) {
-    const splitSum = input.splitPayments.reduce((sum, p) => sum + nonNegativeFinite(p.amount), 0);
+  if (splitPayments.length > 0) {
+    const splitSum = splitPayments.reduce((sum, p) => sum + nonNegativeFinite(p.amount), 0);
     totalReceived = splitSum;
   }
 
@@ -111,10 +116,10 @@ export function calculateInvoice(input: InvoiceCalculationInput): InvoiceCalcula
   const safeAllocations: InvoiceCalculationResult['safeAllocations'] = [];
   
   if (actualCollected > 0) {
-    if (input.splitPayments && input.splitPayments.length > 0) {
+    if (splitPayments.length > 0) {
       // Allocate proportionally or directly based on split portions
       let remainingToAllocate = actualCollected;
-      for (const split of input.splitPayments) {
+      for (const split of splitPayments) {
         if (remainingToAllocate <= 0) break;
         const allocAmount = Math.min(nonNegativeFinite(split.amount), remainingToAllocate);
         if (allocAmount > 0) {
