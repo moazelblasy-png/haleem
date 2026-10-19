@@ -76,7 +76,6 @@ const CLOUD_STATE_KEYS = [
   STORAGE_KEYS.DEVICES,
   STORAGE_KEYS.SESSIONS,
   STORAGE_KEYS.WAITLIST,
-  STORAGE_KEYS.INVENTORY,
   STORAGE_KEYS.SHIFTS,
   STORAGE_KEYS.ACTIVE_SHIFT,
   STORAGE_KEYS.SAFE_TXS,
@@ -279,7 +278,7 @@ interface AppContextType {
     isPrepaid?: boolean;
     paidAmount?: number;
     paymentMethod?: 'cash' | 'instapay' | 'vodafone' | 'card';
-  }) => GameSession;
+  }) => Promise<GameSession>;
   changeSessionControllers: (sessionId: string, newCount: ControllersCount) => void;
   addSessionProduct: (sessionId: string, productId: string, quantity: number, isPaid: boolean) => void;
   markProductPaid: (sessionId: string, sessionProductId: string) => void;
@@ -291,8 +290,8 @@ interface AppContextType {
     paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card' | 'split';
     amountReceived: number;
     splitPayments?: SplitPaymentPortion[];
-  }) => { success: boolean; invoice: GameSession };
-  collectSessionDebt: (sessionId: string, amount: number, paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card') => { success: boolean; message: string; remainingDebt: number };
+  }) => Promise<{ success: boolean; invoice: GameSession }>;
+  collectSessionDebt: (sessionId: string, amount: number, paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card') => Promise<{ success: boolean; message: string; remainingDebt: number }>;
   updateEmployeePermissions: (employeeId: string, permissions: RolePermissions) => void;
 
   // Waitlist
@@ -381,21 +380,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const cloudSaveQueuesRef = useRef<Record<string, Promise<void>>>({});
   const saleIdempotencyKeyRef = useRef<string | null>(null);
 
-  // Read only a Supabase Auth session token. Local app PIN state is never accepted as API identity.
+  // Read only the token belonging to the identity currently signed in through Supabase Auth.
+  // A local employee PIN must never inherit a previous owner's browser token.
+  const cloudAuthUserIdRef = useRef<string | null>(null);
   const getSupabaseAccessToken = useCallback((): string | null => {
     try {
+      const expectedUserId = cloudAuthUserIdRef.current || currentUser?.id;
+      if (!expectedUserId) return null;
+
       const ownSession = JSON.parse(localStorage.getItem('lg_supabase_session') || 'null');
-      if (typeof ownSession?.access_token === 'string' && ownSession.access_token.length > 20) return ownSession.access_token;
+      if (typeof ownSession?.access_token === 'string' &&
+          ownSession.access_token.length > 20 &&
+          ownSession.user?.id === expectedUserId) {
+        return ownSession.access_token;
+      }
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
         if (!key || !/^sb-.+-auth-token$/.test(key)) continue;
         const value = JSON.parse(localStorage.getItem(key) || '{}');
-        const token = value?.access_token || value?.currentSession?.access_token || value?.session?.access_token;
-        if (typeof token === 'string' && token.length > 20) return token;
+        const session = value?.currentSession || value?.session || value;
+        if (typeof session?.access_token === 'string' &&
+            session.access_token.length > 20 &&
+            session.user?.id === expectedUserId) return session.access_token;
       }
     } catch {}
     return null;
-  }, []);
+  }, [currentUser]);
 
   const apiHeaders = useCallback((extra: Record<string, string> = {}): Record<string, string> => {
     const token = getSupabaseAccessToken();
@@ -440,7 +450,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const apiRequest = useCallback(async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
     const response = await fetch(path, { ...init, headers: apiHeaders({ 'Content-Type': 'application/json', ...((init.headers || {}) as Record<string, string>) }) });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok || payload.ok === false) throw new Error(payload?.error?.message || `فشل طلب الخادم (${response.status})`);
+    if (!response.ok || payload.ok === false) {
+      const error = new Error(payload?.error?.message || `فشل طلب الخادم (${response.status})`) as Error & { status?: number; code?: string };
+      error.status = response.status;
+      error.code = payload?.error?.code;
+      throw error;
+    }
     return payload as T;
   }, [apiHeaders]);
 
@@ -466,6 +481,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const persistState = useCallback(<T,>(key: string, value: T) => {
     saveLocal(key, value);
     if (!cloudHydratedRef.current || !CLOUD_STATE_KEYS.includes(key as typeof CLOUD_STATE_KEYS[number])) return;
+    const role = currentUser?.role;
+    if (role && !['owner', 'admin'].includes(role)) {
+      const ownerOnlyKeys = [
+        STORAGE_KEYS.SESSIONS,
+        STORAGE_KEYS.ACTIVE_SHIFT,
+        STORAGE_KEYS.SAFE_TXS,
+        STORAGE_KEYS.EMPLOYEES,
+        STORAGE_KEYS.PERMISSIONS,
+        STORAGE_KEYS.AUDIT_LOG,
+        STORAGE_KEYS.OFFLINE_QUEUE,
+        STORAGE_KEYS.PRICING_TIERS,
+        STORAGE_KEYS.ROUNDING_POLICY,
+        STORAGE_KEYS.NOTIFICATIONS,
+      ];
+      if (ownerOnlyKeys.includes(key as typeof ownerOnlyKeys[number])) return;
+      if (role === 'cashier' && key === STORAGE_KEYS.DEVICES) return;
+    }
     const token = getSupabaseAccessToken();
     if (!token) return; // Local PIN login is not a server-authenticated session.
 
@@ -525,7 +557,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (state[STORAGE_KEYS.DEVICES] !== undefined) setDevices(state[STORAGE_KEYS.DEVICES] as Device[]);
           if (state[STORAGE_KEYS.SESSIONS] !== undefined) setSessions(state[STORAGE_KEYS.SESSIONS] as GameSession[]);
           if (state[STORAGE_KEYS.WAITLIST] !== undefined) setWaitlist(state[STORAGE_KEYS.WAITLIST] as WaitlistItem[]);
-          if (state[STORAGE_KEYS.INVENTORY] !== undefined) setInventory(state[STORAGE_KEYS.INVENTORY] as InventoryItem[]);
           if (state[STORAGE_KEYS.SHIFTS] !== undefined) setShifts(state[STORAGE_KEYS.SHIFTS] as Shift[]);
           if (state[STORAGE_KEYS.ACTIVE_SHIFT] !== undefined) setActiveShiftId(state[STORAGE_KEYS.ACTIVE_SHIFT] as string | null);
           if (state[STORAGE_KEYS.SAFE_TXS] !== undefined) setSafeTransactions(state[STORAGE_KEYS.SAFE_TXS] as SafeTransaction[]);
@@ -633,13 +664,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }).then(async response => {
       const result = await response.json().catch(() => ({}));
       if (!response.ok || result.ok !== true) throw new Error(result?.error?.message || 'Sync failed');
-      const accepted = new Set((result.results || []).filter((x: any) => x.accepted).map((x: any) => x.idempotencyKey));
-      setOfflineQueue(prev => prev.map(item => accepted.has(item.idempotencyKey || item.id) ? { ...item, status: 'synced' } : item));
-      addNotification({ title: 'تم حفظ إيصالات المزامنة', message: `تم تأكيد ${accepted.size} عملية من الخادم. ملاحظة: إيصال المزامنة لا يعني تنفيذ العملية المالية داخل قاعدة البيانات.`, type: 'success' });
-    }).catch(() => addNotification({ title: 'فشلت المزامنة', message: 'لم يؤكد الخادم حفظ العمليات؛ ستظل معلقة ويمكن إعادة المحاولة.', type: 'warning' }));
-  }, [offlineQueue, addNotification, getSupabaseAccessToken, apiHeaders]);
+      const executedResults = (result.results || []).filter((x: any) => x.accepted && x.executed === true);
+      const accepted = new Set(executedResults.map((x: any) => x.idempotencyKey));
+      if (accepted.size !== pending.length) throw new Error('Some queued actions have not been executed by the server.');
+      const syncedSessionIds = new Set<string>();
+      const transactionsToAdd: SafeTransaction[] = [];
 
-  // --------------------------------------------------------------------------
+      for (const item of executedResults) {
+        if (item.versions && typeof item.versions === 'object') Object.assign(cloudVersionsRef.current, item.versions);
+        const remote = item.result || {};
+        const session = remote.session as GameSession | null;
+        if (session && typeof session.id === 'string') {
+          syncedSessionIds.add(session.id);
+          setSessions(prev => prev.some(existing => existing.id === session.id)
+            ? prev.map(existing => existing.id === session.id ? session : existing)
+            : [session, ...prev]);
+          setDevices(prev => prev.map(device => device.id !== session.deviceId ? device : session.status === 'active'
+            ? { ...device, status: 'busy', currentGame: session.gameName, activeSessionId: session.id }
+            : { ...device, status: 'available', currentGame: undefined, activeSessionId: undefined }));
+        }
+
+        const queued = pending.find(action => (action.idempotencyKey || action.id) === item.idempotencyKey);
+        const queuedShiftId = typeof queued?.payload?.shiftId === 'string' ? queued.payload.shiftId : (activeShiftId || 'offline-sync');
+        const queuedBranchId = session?.branchId || queued?.payload?.completedSession?.branchId || activeBranch?.id || '';
+        const remoteTransactions = Array.isArray(remote.transactions) ? remote.transactions : remote.transaction ? [remote.transaction] : [];
+        for (const tx of remoteTransactions) {
+          if (!tx || typeof tx.id !== 'string') continue;
+          transactionsToAdd.push({
+            id: tx.id,
+            shiftId: queuedShiftId,
+            branchId: queuedBranchId,
+            type: tx.type as SafeTransaction['type'],
+            amount: Number(tx.amount),
+            paymentMethod: tx.payment_method as SafeTransaction['paymentMethod'],
+            description: String(tx.description || ''),
+            performedBy: currentUser?.name || 'كاشير',
+            timestamp: Date.parse(tx.created_at) || Date.now(),
+          });
+        }
+      }
+
+      if (transactionsToAdd.length || syncedSessionIds.size) {
+        const incomingIds = new Set(transactionsToAdd.map(tx => tx.id));
+        setSafeTransactions(prev => {
+          const withoutPendingCopies = prev.filter(tx => {
+            for (const sessionId of syncedSessionIds) {
+              if (tx.id.startsWith('pending-session-' + sessionId + '-') || tx.id.startsWith('pending-debt-' + sessionId + '-')) return false;
+            }
+            return !incomingIds.has(tx.id);
+          });
+          return [...transactionsToAdd, ...withoutPendingCopies];
+        });
+      }
+
+      setOfflineQueue(prev => prev.map(item => accepted.has(item.idempotencyKey || item.id) ? { ...item, status: 'synced' } : item));
+      addNotification({ title: 'تم تنفيذ العمليات المتأخرة', message: 'تم تنفيذ ' + accepted.size + ' عملية على الخادم وتأكيد حفظها.', type: 'success' });
+    }).catch((error) => addNotification({
+      title: 'فشلت المزامنة',
+      message: error instanceof Error ? error.message : 'لم يؤكد الخادم حفظ العمليات؛ ستظل معلقة ويمكن إعادة المحاولة.',
+      type: 'warning',
+    }));
+  }, [offlineQueue, addNotification, getSupabaseAccessToken, apiHeaders, activeShiftId, activeBranch, currentUser]);  // --------------------------------------------------------------------------
   // REAL-TIME SESSION MONITOR & AUDIO ALARMS (User requirement: 5-min warning,
   // session finished alarm, and periodic overdue buzzer!)
   // --------------------------------------------------------------------------
@@ -756,13 +841,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem('lg_owner_bootstrap_code', data.bootstrapCode);
       if (!session.access_token) return { success: true, requiresEmailConfirmation: true, message: 'تم إنشاء الحساب وإرسال طلب تأكيد البريد. افتح رسالة التأكيد في البريد الوارد أو Spam؛ لا تعِد التسجيل. بعد التأكيد سجّل الدخول لإكمال تهيئة المالك.' };
       localStorage.setItem('lg_supabase_session', JSON.stringify(session));
+      cloudAuthUserIdRef.current = String(session.user?.id || '');
       const boot = await apiRequest<{ user: { id: string; name: string; phone: string; role: string } }>('/api/auth/bootstrap-owner', { method: 'POST', body: JSON.stringify({ name: data.name.trim(), phone: data.phone.trim(), bootstrapCode: data.bootstrapCode }) });
+      await apiRequest('/api/owner/profile', {
+        method: 'PUT',
+        body: JSON.stringify({ name: data.name.trim(), phone: data.phone.trim(), businessName: 'Liverpool Gaming' }),
+      });
       localStorage.removeItem('lg_owner_bootstrap_code');
       const profile: OwnerProfile = { id: boot.user.id, name: data.name.trim(), phone: data.phone.trim(), pinHash: '', businessName: 'Liverpool Gaming', subscriptionPlan: 'Multi-Branch', renewalDate: '', createdAt: Date.now(), twoFactorEnabled: false };
       setOwnerProfile(profile);
       setCurrentUser({ id: boot.user.id, name: profile.name, phone: profile.phone, role: 'owner', pinOrPassword: '', isOwner: true });
       return { success: true, requiresEmailConfirmation: false, message: 'تم إنشاء حساب المالك وربطه بالخادم بنجاح.' };
-    } catch (e) { localStorage.removeItem('lg_supabase_session'); return { success: false, requiresEmailConfirmation: false, message: e instanceof Error ? e.message : 'تعذر إنشاء حساب المالك' }; }
+    } catch (e) { localStorage.removeItem('lg_supabase_session'); cloudAuthUserIdRef.current = null; return { success: false, requiresEmailConfirmation: false, message: e instanceof Error ? e.message : 'تعذر إنشاء حساب المالك' }; }
   }, [ownerProfile, supabaseAuthRequest, apiRequest]);
 
   const loginWithSupabase = useCallback(async (email: string, password: string) => {
@@ -770,6 +860,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const session = await supabaseAuthRequest('token?grant_type=password', { email: email.trim(), password });
       if (!session.access_token) return { success: false, message: 'لم يُرجع خادم المصادقة جلسة صالحة.' };
       localStorage.setItem('lg_supabase_session', JSON.stringify(session));
+      cloudAuthUserIdRef.current = String(session.user?.id || '');
       let me: { user: { id: string; role: User['role']; email?: string | null } };
       try {
         me = await apiRequest<{ user: { id: string; role: User['role']; email?: string | null } }>('/api/auth/me');
@@ -791,6 +882,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setInventory(cloudInventory);
       const cloudOwner = (profile.state?.[STORAGE_KEYS.OWNER] || null) as OwnerProfile | null;
       const state = profile.state || {};
+      let ownerProfileFromServer: OwnerProfile | null = null;
+      if (me.user.role === 'owner') {
+        const ownerResult = await apiRequest<{ profile: { name: string; phone: string; businessName: string; createdAt: string } | null }>('/api/owner/profile');
+        let ownerRecord = ownerResult.profile;
+        if (!ownerRecord) {
+          const name = String(cloudOwner?.name || session.user?.user_metadata?.name || email.split('@')[0]);
+          const phone = String(cloudOwner?.phone || session.user?.user_metadata?.phone || '');
+          const businessName = String(cloudOwner?.businessName || 'Liverpool Gaming');
+          const saved = await apiRequest<{ profile: { name: string; phone: string; businessName: string; createdAt: string } }>('/api/owner/profile', {
+            method: 'PUT',
+            body: JSON.stringify({ name, phone, businessName }),
+          });
+          ownerRecord = saved.profile;
+        }
+        ownerProfileFromServer = {
+          id: me.user.id,
+          name: ownerRecord.name,
+          phone: ownerRecord.phone,
+          pinHash: '',
+          businessName: ownerRecord.businessName,
+          subscriptionPlan: 'Multi-Branch',
+          renewalDate: '',
+          createdAt: Date.parse(ownerRecord.createdAt) || Date.now(),
+          twoFactorEnabled: false,
+        };
+      }
       if (state[STORAGE_KEYS.BRANCHES] !== undefined) setBranches(state[STORAGE_KEYS.BRANCHES] as Branch[]);
       if (state[STORAGE_KEYS.ACTIVE_BRANCH] !== undefined) setActiveBranchIdState(state[STORAGE_KEYS.ACTIVE_BRANCH] as string);
       if (state[STORAGE_KEYS.DEVICES] !== undefined) setDevices(state[STORAGE_KEYS.DEVICES] as Device[]);
@@ -809,7 +926,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCurrentUser({ id: me.user.id, name: String(displayName), phone: String(session.user?.user_metadata?.phone || cloudOwner?.phone || ''), role: me.user.role, pinOrPassword: '', isOwner: me.user.role === 'owner' });
       if (cloudOwner) setOwnerProfile(cloudOwner);
       return { success: true, message: `تم تسجيل الدخول بصلاحية ${me.user.role}.` };
-    } catch (e) { localStorage.removeItem('lg_supabase_session'); return { success: false, message: e instanceof Error ? e.message : 'فشل تسجيل الدخول أو الحساب غير مخوّل' }; }
+    } catch (e) { localStorage.removeItem('lg_supabase_session'); cloudAuthUserIdRef.current = null; return { success: false, message: e instanceof Error ? e.message : 'فشل تسجيل الدخول أو الحساب غير مخوّل' }; }
   }, [supabaseAuthRequest, apiRequest]);
 
   const setupPrimaryOwner = useCallback((data: { name: string; phone: string; pinOrPassword: string; enable2FA?: boolean }): boolean => {
@@ -897,6 +1014,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logoutUser = useCallback(() => {
     localStorage.removeItem('lg_supabase_session');
+    cloudAuthUserIdRef.current = null;
     setCurrentUser(null);
   }, []);
 
@@ -953,7 +1071,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     recordAudit('stock_adjustment', `تهيئة ${newDevs.length} أجهزة لفرع ${targetBranch.nameAr}`);
   }, [branches, recordAudit]);
 
-  const startSession = useCallback((data: {
+  const startSession = useCallback(async (data: {
     deviceId: string;
     customerName: string;
     customerPhone?: string;
@@ -965,21 +1083,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isPrepaid?: boolean;
     paidAmount?: number;
     paymentMethod?: 'cash' | 'instapay' | 'vodafone' | 'card';
-  }): GameSession => {
-    // Check shift permissions: If user is employee (not owner) and active shift is closed, block!
+  }): Promise<GameSession> => {
     if (!currentUser?.isOwner && !activeShift) {
       throw new Error('لا يمكن بدء جلسة دون فتح شيفت استلام للكاشير أولاً');
     }
 
     const dev = devices.find(d => d.id === data.deviceId);
-    if (!dev) throw new Error('Device not found');
+    if (!dev) throw new Error('الجهاز غير موجود');
     if (dev.status !== 'available') throw new Error('لا يمكن بدء جلسة على جهاز غير متاح');
 
     const now = Date.now();
-    const sessionNum = `#S${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
-
+    const sessionNum = '#S' + new Date().toISOString().slice(2, 10).replace(/-/g, '') + '-' + Math.floor(100 + Math.random() * 900);
     const initialSegment = {
-      id: `seg-${now}-1`,
+      id: 'seg-' + now + '-1',
       deviceType: dev.type,
       controllers: data.controllers,
       startTime: now,
@@ -987,7 +1103,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     const newSession: GameSession = {
-      id: `ses-${now}`,
+      id: 'ses-' + now,
       sessionNumber: sessionNum,
       deviceId: dev.id,
       branchId: dev.branchId,
@@ -1011,37 +1127,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       endedAlarmPlayed: false,
     };
 
+    const accessToken = getSupabaseAccessToken();
+    let queuedForSync = false;
+    if (!navigator.onLine) {
+      queueOfflineAction('start_session', { session: newSession, shiftId: activeShiftId || 'owner-session' });
+      queuedForSync = true;
+    } else if (accessToken) {
+      try {
+        const result = await apiRequest<{ versions?: Record<string, number> }>('/api/sessions/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            idempotencyKey: 'start-' + newSession.id,
+            session: newSession,
+            shiftId: activeShiftId || 'owner-session',
+          }),
+        });
+        if (result.versions) Object.assign(cloudVersionsRef.current, result.versions);
+      } catch (error) {
+        const status = error && typeof error === 'object' && 'status' in error
+          ? Number((error as { status?: number }).status)
+          : undefined;
+        // Business/auth conflicts must be resolved, not retried as offline work.
+        if (status !== undefined && status < 500) throw error;
+        queueOfflineAction('start_session', { session: newSession, shiftId: activeShiftId || 'owner-session' });
+        queuedForSync = true;
+        addNotification({
+          title: 'الجلسة محفوظة محليًا وتحتاج مزامنة',
+          message: 'لم يؤكد الخادم بدء الجلسة. ستظل العملية معلقة حتى تنجح المزامنة.',
+          type: 'warning',
+        });
+      }
+    } else {
+      addNotification({
+        title: 'الجلسة على هذا الجهاز فقط',
+        message: 'سجّل الدخول السحابي حتى يتمكن البرنامج من حفظ الجلسة في قاعدة البيانات.',
+        type: 'warning',
+      });
+    }
+
     setDevices(prev => prev.map(d => d.id === dev.id ? {
       ...d,
       status: 'busy',
       currentGame: data.gameName,
       activeSessionId: newSession.id,
     } : d));
-
     setSessions(prev => [newSession, ...prev]);
 
     if (data.isPrepaid && data.paidAmount && data.paidAmount > 0) {
       const tx: SafeTransaction = {
-        id: `tx-${Date.now()}`,
+        id: 'tx-' + now,
         shiftId: activeShiftId || 'owner-session',
         branchId: dev.branchId,
         type: 'gaming_revenue',
         amount: data.paidAmount,
         paymentMethod: data.paymentMethod || 'cash',
-        description: `دفعة مسبقة ${sessionNum} (${dev.screenNumber})`,
+        description: 'دفعة مسبقة ' + sessionNum + ' (' + dev.screenNumber + ')',
         performedBy: currentUser?.name || 'المالك',
-        timestamp: Date.now(),
+        timestamp: now,
       };
       setSafeTransactions(prev => [tx, ...prev]);
     }
 
-    recordAudit('session_started', `بدء ${data.sessionType === 'timed' ? 'جلسة بوقت' : data.sessionType === 'budget' ? 'جلسة بميزانية' : 'جلسة مفتوحة'} ${sessionNum} على ${dev.screenNumber} (${dev.type})`);
-    if (!navigator.onLine) {
-      queueOfflineAction('start_session', newSession);
+    recordAudit('session_started', 'بدء ' + (data.sessionType === 'timed' ? 'جلسة بوقت' : data.sessionType === 'budget' ? 'جلسة بميزانية' : 'جلسة مفتوحة') + ' ' + sessionNum + ' على ' + dev.screenNumber + ' (' + dev.type + ')');
+    if (queuedForSync) {
+      addNotification({
+        title: 'العملية بانتظار المزامنة',
+        message: 'لن تعتبر الجلسة متزامنة إلا بعد تنفيذها على الخادم.',
+        type: 'warning',
+      });
     }
     return newSession;
-  }, [currentUser, activeShift, devices, pricingTiers, activeShiftId, recordAudit, queueOfflineAction]);
-
+  }, [currentUser, activeShift, devices, pricingTiers, activeShiftId, recordAudit, queueOfflineAction, getSupabaseAccessToken, apiRequest, addNotification]);
   const changeSessionControllers = useCallback((sessionId: string, newCount: ControllersCount) => {
     setSessions(prev => prev.map(s => {
       if (s.id !== sessionId || s.status !== 'active') return s;
@@ -1207,30 +1363,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   }, [pricingTiers, currentUser, recordAudit]);
 
-  const completeSession = useCallback((sessionId: string, checkoutData: {
+  const completeSession = useCallback(async (sessionId: string, checkoutData: {
     discountType: 'none' | 'fixed' | 'percent';
     discountValue: number;
     paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card' | 'split';
     amountReceived: number;
     splitPayments?: SplitPaymentPortion[];
-  }): { success: boolean; invoice: GameSession } => {
+  }): Promise<{ success: boolean; invoice: GameSession }> => {
     const session = sessions.find(s => s.id === sessionId);
-    if (!session) throw new Error('Session not found');
+    if (!session) throw new Error('الجلسة غير موجودة');
     if (session.status !== 'active') throw new Error('لا يمكن إغلاق جلسة غير نشطة أو تحصيلها مرة أخرى');
     if (completedSessionIds.current.has(sessionId)) throw new Error('تمت محاسبة هذه الجلسة بالفعل');
 
     const now = Date.now();
-    const finalSegments = session.segments.map(seg => ({
-      ...seg,
-      endTime: seg.endTime || now,
-    }));
-
+    const finalSegments = session.segments.map(seg => ({ ...seg, endTime: seg.endTime || now }));
     const { totalCost: gamingCost } = calculateSessionGamingCost(finalSegments, now, pricingTiers, roundingPolicy);
-    const unpaidProductsTotal = session.products
-      .filter(p => !p.isPaid)
+    const unpaidProductsTotal = session.products.filter(p => !p.isPaid)
       .reduce((acc, p) => acc + (p.unitPrice * p.quantity), 0);
     const productsTotal = session.products.reduce((acc, p) => acc + (p.unitPrice * p.quantity), 0);
-
     const invResult = calculateInvoice({
       gamingTotal: gamingCost,
       productsTotal: unpaidProductsTotal,
@@ -1261,91 +1411,183 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       changeGiven: invResult.changeGiven,
       products: session.products.map(p => ({ ...p, isPaid: true })),
     };
+    const shiftId = activeShiftId || 'owner-checkout';
+    const idempotencyKey = 'complete-' + sessionId;
+    const financials = {
+      gamingTotal: gamingCost,
+      productsTotal,
+      billableProductsTotal: unpaidProductsTotal,
+      grossTotal: invResult.grossTotal,
+      grandTotal: invResult.netGrandTotal,
+      actualCollected: invResult.actualCollected,
+      remainingDebt: invResult.remainingDebt,
+      discountValue: checkoutData.discountValue,
+      discountAmount: invResult.discountAmount,
+    };
+    const allocations = invResult.safeAllocations.map(alloc => ({
+      amount: alloc.amount,
+      paymentMethod: alloc.paymentMethod,
+      description: alloc.description,
+    }));
 
-    setDevices(prev => prev.map(d => d.id === session.deviceId ? {
-      ...d,
-      status: 'available',
-      currentGame: undefined,
-      activeSessionId: undefined,
-    } : d));
-
-    setSessions(prev => prev.map(s => s.id === sessionId ? updatedSession : s));
-    completedSessionIds.current.add(sessionId);
-
-    // Record safe transactions ONLY for the actual collected money, split by payment method
-    if (invResult.safeAllocations.length > 0) {
-      const dev = devices.find(d => d.id === session.deviceId);
-      const newTxs: SafeTransaction[] = invResult.safeAllocations.map((alloc, idx) => ({
-        id: `tx-${now}-${idx}`,
-        shiftId: activeShiftId || 'owner-checkout',
-        branchId: session.branchId,
-        type: 'gaming_revenue',
-        amount: alloc.amount,
-        paymentMethod: alloc.paymentMethod,
-        description: `محاسبة جلسة ${session.sessionNumber} (${dev?.screenNumber || ''}) - ${alloc.paymentMethod === 'cash' ? 'نقدي' : alloc.paymentMethod}`,
-        performedBy: currentUser?.name || 'كاشير',
-        timestamp: now,
-      }));
-      setSafeTransactions(prev => [...newTxs, ...prev]);
+    let savedSession = updatedSession;
+    let savedTransactions: Array<{id:string;created_at:string;type:string;payment_method:string;amount:number;description:string}> = [];
+    const token = getSupabaseAccessToken();
+    let queuedForSync = false;
+    if (!token) throw new Error('سجّل الدخول بالحساب السحابي قبل محاسبة الجلسة حتى لا تضيع العملية المالية.');
+    if (!navigator.onLine) {
+      queueOfflineAction('complete_session', { idempotencyKey, sessionId, shiftId, completedSession: updatedSession, financials, allocations });
+      queuedForSync = true;
+    } else {
+      try {
+        const result = await apiRequest<{
+          session?: GameSession;
+          transactions?: Array<{id:string;created_at:string;type:string;payment_method:string;amount:number;description:string}>;
+          versions?: Record<string,number>;
+        }>('/api/sessions/complete', {
+          method: 'POST',
+          body: JSON.stringify({ idempotencyKey, sessionId, shiftId, completedSession: updatedSession, financials, allocations }),
+        });
+        savedSession = result.session || updatedSession;
+        savedTransactions = result.transactions || [];
+        if (result.versions) Object.assign(cloudVersionsRef.current, result.versions);
+      } catch (error) {
+        const status = error && typeof error === 'object' && 'status' in error
+          ? Number((error as {status?:number}).status)
+          : undefined;
+        if (status !== undefined && status < 500) throw error;
+        queueOfflineAction('complete_session', { idempotencyKey, sessionId, shiftId, completedSession: updatedSession, financials, allocations });
+        queuedForSync = true;
+      }
     }
 
-    recordAudit('session_completed', `إنهاء ${session.sessionNumber} بواسطة ${currentUser?.name || 'كاشير'} — المحاسبة ${invResult.actualCollected} EGP، المديونية ${invResult.remainingDebt} EGP`);
-    return { success: true, invoice: updatedSession };
-  }, [sessions, pricingTiers, roundingPolicy, currentUser, devices, activeShiftId, recordAudit]);
+    setDevices(prev => prev.map(d => d.id === savedSession.deviceId ? {
+      ...d, status: 'available', currentGame: undefined, activeSessionId: undefined,
+    } : d));
+    setSessions(prev => prev.map(s => s.id === sessionId ? savedSession : s));
+    completedSessionIds.current.add(sessionId);
 
-  const collectSessionDebt = useCallback((
+    const fallbackTransactions = allocations.map((alloc, idx) => ({
+      id: 'pending-session-' + sessionId + '-' + idx,
+      created_at: new Date(now).toISOString(),
+      type: 'gaming_revenue',
+      payment_method: alloc.paymentMethod,
+      amount: alloc.amount,
+      description: alloc.description,
+    }));
+    const transactionsToAdd = (queuedForSync ? fallbackTransactions : savedTransactions).map(tx => ({
+      id: tx.id,
+      shiftId,
+      branchId: savedSession.branchId,
+      type: tx.type as SafeTransaction['type'],
+      amount: Number(tx.amount),
+      paymentMethod: tx.payment_method as SafeTransaction['paymentMethod'],
+      description: tx.description,
+      performedBy: currentUser?.name || 'كاشير',
+      timestamp: Date.parse(tx.created_at) || now,
+    }));
+    setSafeTransactions(prev => {
+      const incomingIds = new Set(transactionsToAdd.map(tx => tx.id));
+      return [...transactionsToAdd, ...prev.filter(old => !incomingIds.has(old.id))];
+    });
+
+    if (queuedForSync) addNotification({
+      title: 'الفاتورة محفوظة محليًا',
+      message: 'تم تجهيز فاتورة الجلسة على هذا الجهاز، وسيتم تنفيذها على الخادم عند عودة الإنترنت. لا تعتبرها مؤكدة سحابيًا حتى يظهر إشعار نجاح المزامنة.',
+      type: 'warning',
+    });
+    recordAudit('session_completed', 'إنهاء ' + session.sessionNumber + ' بواسطة ' + (currentUser?.name || 'كاشير') +
+      ' — المحاسبة ' + invResult.actualCollected + ' EGP، المديونية ' + invResult.remainingDebt + ' EGP');
+    return { success: true, invoice: savedSession };
+  }, [sessions, pricingTiers, roundingPolicy, currentUser, devices, activeShiftId, recordAudit,
+      apiRequest, getSupabaseAccessToken, queueOfflineAction, addNotification]);
+
+  const collectSessionDebt = useCallback(async (
     sessionId: string,
     amount: number,
     paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card'
-  ): { success: boolean; message: string; remainingDebt: number } => {
+  ): Promise<{ success: boolean; message: string; remainingDebt: number }> => {
     const session = sessions.find(s => s.id === sessionId);
     if (!session) return { success: false, message: 'الجلسة غير موجودة', remainingDebt: 0 };
-    if (!session.remainingDebt || session.remainingDebt <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) return { success: false, message: 'أدخل مبلغًا صحيحًا', remainingDebt: Number(session.remainingDebt || 0) };
+    if (!session.remainingDebt || session.remainingDebt <= 0)
       return { success: false, message: 'لا توجد مديونية مستحقة على هذه الجلسة', remainingDebt: 0 };
-    }
-
-    const { collectedAmount, newRemainingDebt, isFullySettled, safeTransaction } = settleDebtPayment(
-      session.remainingDebt,
-      amount,
-      paymentMethod
-    );
-
-    const dev = devices.find(d => d.id === session.deviceId);
-    const tx: SafeTransaction = {
-      id: `tx-${Date.now()}`,
-      shiftId: activeShiftId || 'direct-collection',
-      branchId: session.branchId,
-      type: safeTransaction.type,
-      amount: safeTransaction.amount,
-      paymentMethod: safeTransaction.paymentMethod,
-      description: `تحصيل متبقي مديونية ${session.sessionNumber} (${dev?.screenNumber || ''}) للعميل ${session.customerName}`,
-      performedBy: currentUser?.name || 'كاشير',
-      timestamp: Date.now(),
-    };
-
-    setSafeTransactions(prev => [tx, ...prev]);
-
-    const debtRecord = {
+    const { collectedAmount, newRemainingDebt, isFullySettled } = settleDebtPayment(session.remainingDebt, amount, paymentMethod);
+    if (collectedAmount <= 0) return { success: false, message: 'المبلغ المحصل يجب أن يكون أكبر من صفر', remainingDebt: session.remainingDebt };
+    const shiftId = activeShiftId || 'direct-collection';
+    const idempotencyKey = 'debt-' + sessionId.slice(-24) + '-' +
+      Math.round(Number(session.remainingDebt) * 100) + '-' + Math.round(collectedAmount * 100) + '-' + paymentMethod;
+    const paymentRecord = {
       amount: collectedAmount,
       paidAt: Date.now(),
       paymentMethod,
       receivedBy: currentUser?.name || 'كاشير',
     };
+    const updatedSession = {
+      ...session,
+      paidAmount: session.paidAmount + collectedAmount,
+      remainingDebt: newRemainingDebt,
+      isFullyPaid: isFullySettled,
+      debtPaidHistory: [...(session.debtPaidHistory || []), paymentRecord],
+    };
+    const token = getSupabaseAccessToken();
+    if (!token) return { success: false, message: 'سجّل الدخول بالحساب السحابي قبل تحصيل المديونية.', remainingDebt: session.remainingDebt };
 
-    setSessions(prev => prev.map(s => {
-      if (s.id !== sessionId) return s;
-      return {
-        ...s,
-        paidAmount: s.paidAmount + collectedAmount,
-        remainingDebt: newRemainingDebt,
-        isFullyPaid: isFullySettled,
-        debtPaidHistory: [...(s.debtPaidHistory || []), debtRecord],
+    let savedSession: GameSession = updatedSession;
+    let transaction: {id:string;created_at:string;type:string;payment_method:string;amount:number;description:string} | null = null;
+    let queuedForSync = false;
+    if (!navigator.onLine) {
+      queueOfflineAction('collect_session_debt', { idempotencyKey, sessionId, shiftId, amount: collectedAmount, paymentMethod });
+      queuedForSync = true;
+    } else {
+      try {
+        const result = await apiRequest<{
+          session?: GameSession;
+          transaction?: {id:string;created_at:string;type:string;payment_method:string;amount:number;description:string} | null;
+          versions?: Record<string,number>;
+        }>('/api/sessions/debt-payments', {
+          method: 'POST',
+          body: JSON.stringify({ idempotencyKey, sessionId, shiftId, amount: collectedAmount, paymentMethod }),
+        });
+        savedSession = result.session || updatedSession;
+        transaction = result.transaction || null;
+        if (result.versions) Object.assign(cloudVersionsRef.current, result.versions);
+      } catch (error) {
+        const status = error && typeof error === 'object' && 'status' in error
+          ? Number((error as {status?:number}).status)
+          : undefined;
+        if (status !== undefined && status < 500) return {
+          success:false,message:error instanceof Error ? error.message : 'تعذر تحصيل المديونية',remainingDebt:session.remainingDebt
+        };
+        queueOfflineAction('collect_session_debt', { idempotencyKey, sessionId, shiftId, amount: collectedAmount, paymentMethod });
+        queuedForSync = true;
+      }
+    }
+    setSessions(prev => prev.map(s => s.id === sessionId ? savedSession : s));
+    const tx = transaction || (queuedForSync ? {
+      id:'pending-debt-' + sessionId + '-' + Math.round(Date.now()/1000),
+      created_at:new Date().toISOString(),
+      type:'debt_collection',
+      payment_method:paymentMethod,
+      amount:collectedAmount,
+      description:'تحصيل مديونية جلسة ' + session.sessionNumber,
+    } : null);
+    if (tx) {
+      const safeTx: SafeTransaction = {
+        id:tx.id, shiftId, branchId:session.branchId, type:tx.type as SafeTransaction['type'],
+        amount:Number(tx.amount), paymentMethod:tx.payment_method as SafeTransaction['paymentMethod'],
+        description:tx.description, performedBy:currentUser?.name || 'كاشير', timestamp:Date.parse(tx.created_at)||Date.now(),
       };
-    }));
-
-    recordAudit('payment_received', `سداد مديونية جلسة ${session.sessionNumber} بقيمة ${collectedAmount} EGP (${paymentMethod})`);
-    return { success: true, message: `تم تحصيل مبلغ ${collectedAmount} EGP بنجاح`, remainingDebt: newRemainingDebt };
-  }, [sessions, devices, activeShiftId, currentUser, recordAudit]);
+      setSafeTransactions(prev => [safeTx,...prev.filter(old=>old.id!==safeTx.id)]);
+    }
+    if (queuedForSync) addNotification({
+      title:'تحصيل المديونية محفوظ محليًا',
+      message:'سيتم اعتماد التحصيل على الخادم عند عودة الإنترنت. لا تعتبره مؤكدًا حتى يظهر إشعار نجاح المزامنة.',
+      type:'warning',
+    });
+    recordAudit('payment_received', 'سداد مديونية جلسة ' + session.sessionNumber + ' بقيمة ' + collectedAmount + ' EGP (' + paymentMethod + ')');
+    return { success: true, message: queuedForSync ? 'تم حفظ التحصيل محليًا وينتظر المزامنة' : 'تم تحصيل مبلغ ' + collectedAmount + ' EGP بنجاح', remainingDebt: savedSession.remainingDebt || 0 };
+  }, [sessions, activeShiftId, currentUser, recordAudit, apiRequest, getSupabaseAccessToken, queueOfflineAction, addNotification]);
 
   // --------------------------------------------------------------------------
   // Waitlist

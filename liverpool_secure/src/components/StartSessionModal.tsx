@@ -75,7 +75,7 @@ export const StartSessionModal: React.FC<StartSessionModalProps> = ({
     budgetInfo = calculateBudgetSessionDetails(budgetEgp, currentDevice.type, controllers, pricingTiers);
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const finalCustomerName = customerName.trim() || `عميل ${currentDevice.screenNumber}`;
     const game = customGame.trim() || selectedGame;
@@ -85,7 +85,7 @@ export const StartSessionModal: React.FC<StartSessionModalProps> = ({
       : undefined;
 
     try {
-      startSession({
+      await startSession({
         deviceId: currentDevice.id,
         customerName: finalCustomerName,
         customerPhone: customerPhone.trim() || undefined,
