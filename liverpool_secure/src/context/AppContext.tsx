@@ -686,7 +686,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const queued = pending.find(action => (action.idempotencyKey || action.id) === item.idempotencyKey);
         const queuedShiftId = typeof queued?.payload?.shiftId === 'string' ? queued.payload.shiftId : (activeShiftId || 'offline-sync');
-        const queuedBranchId = session?.branchId || queued?.payload?.completedSession?.branchId || currentUser?.id || '';
+        const queuedBranchId = session?.branchId || queued?.payload?.completedSession?.branchId || activeBranch?.id || '';
         const remoteTransactions = Array.isArray(remote.transactions) ? remote.transactions : remote.transaction ? [remote.transaction] : [];
         for (const tx of remoteTransactions) {
           if (!tx || typeof tx.id !== 'string') continue;
@@ -724,7 +724,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       message: error instanceof Error ? error.message : 'لم يؤكد الخادم حفظ العمليات؛ ستظل معلقة ويمكن إعادة المحاولة.',
       type: 'warning',
     }));
-  }, [offlineQueue, addNotification, getSupabaseAccessToken, apiHeaders, activeShiftId, currentUser]);  // --------------------------------------------------------------------------
+  }, [offlineQueue, addNotification, getSupabaseAccessToken, apiHeaders, activeShiftId, activeBranch, currentUser]);  // --------------------------------------------------------------------------
   // REAL-TIME SESSION MONITOR & AUDIO ALARMS (User requirement: 5-min warning,
   // session finished alarm, and periodic overdue buzzer!)
   // --------------------------------------------------------------------------
@@ -1416,10 +1416,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const financials = {
       gamingTotal: gamingCost,
       productsTotal,
+      billableProductsTotal: unpaidProductsTotal,
+      grossTotal: invResult.grossTotal,
       grandTotal: invResult.netGrandTotal,
       actualCollected: invResult.actualCollected,
       remainingDebt: invResult.remainingDebt,
-      discountValue: invResult.discountAmount,
+      discountValue: checkoutData.discountValue,
+      discountAmount: invResult.discountAmount,
     };
     const allocations = invResult.safeAllocations.map(alloc => ({
       amount: alloc.amount,
@@ -1485,7 +1488,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
     setSafeTransactions(prev => {
       const incomingIds = new Set(transactionsToAdd.map(tx => tx.id));
-      return [...transactionsToAdd.filter(tx => !prev.some(old => old.id === tx.id)), ...prev.filter(old => !incomingIds.has(old.id))];
+      return [...transactionsToAdd, ...prev.filter(old => !incomingIds.has(old.id))];
     });
 
     if (queuedForSync) addNotification({
