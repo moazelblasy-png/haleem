@@ -1,10 +1,14 @@
 /**
- * Liverpool Gaming - Security & Cryptographic Utilities
- * Provides secure PIN/password hashing (SHA-256 representation) and verification
- * to ensure no raw passwords or PINs are stored in plain text in localStorage.
+ * Liverpool Gaming - Legacy PIN/password compatibility helpers.
+ *
+ * IMPORTANT: hashPinOrPassword is a deterministic, non-cryptographic 64-bit-style
+ * hash and is NOT suitable for protecting passwords or PINs against offline guessing.
+ * It is retained temporarily for compatibility with existing stored values.
+ * Do not use it for new credential storage; migrate to a server-side password
+ * hashing scheme with a versioned format before replacing this implementation.
  */
 
-// Simple deterministic cryptographic hash representation for browser and node environments
+// Legacy deterministic hash retained for compatibility; this is not cryptographic.
 export function hashPinOrPassword(input: string): string {
   if (!input) return '';
   let hash1 = 0x811c9dc5;
@@ -25,6 +29,7 @@ export function verifyPinOrPassword(input: string, storedHashOrRaw: string): boo
   if (storedHashOrRaw.startsWith('lg_sec_')) {
     return hashPinOrPassword(input) === storedHashOrRaw;
   }
-  // Migration fallback: if existing legacy stored value is raw, compare and upgrade
+  // Legacy plaintext compatibility only. This comparison does NOT upgrade or rewrite
+  // the stored value; callers must not assume successful login migrates the credential.
   return input === storedHashOrRaw;
 }
