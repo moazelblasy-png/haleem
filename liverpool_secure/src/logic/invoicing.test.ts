@@ -303,3 +303,31 @@ test('Malformed split-payment entries are ignored instead of crashing invoice ca
   assert.equal(result.remainingDebt, 100);
   assert.equal(result.safeAllocations.length, 0);
 });
+
+
+test('Mixed valid and malformed split payments use only valid split amounts', () => {
+  const splitPayments = [
+    null,
+    { method: 'cash', amount: 25 },
+    { method: 'instapay' },
+    { method: 'vodafone', amount: 15 },
+  ] as unknown as NonNullable<Parameters<typeof calculateInvoice>[0]['splitPayments']>;
+
+  const result = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 0,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 0,
+    amountReceived: 100,
+    splitPayments,
+  });
+
+  assert.equal(result.actualCollected, 40);
+  assert.equal(result.remainingDebt, 60);
+  assert.equal(result.safeAllocations.reduce((sum, item) => sum + item.amount, 0), 40);
+  assert.deepEqual(
+    result.safeAllocations.map((item) => [item.paymentMethod, item.amount]),
+    [['cash', 25], ['vodafone', 15]],
+  );
+});
