@@ -290,8 +290,8 @@ interface AppContextType {
     paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card' | 'split';
     amountReceived: number;
     splitPayments?: SplitPaymentPortion[];
-  }) => { success: boolean; invoice: GameSession };
-  collectSessionDebt: (sessionId: string, amount: number, paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card') => { success: boolean; message: string; remainingDebt: number };
+  }) => Promise<{ success: boolean; invoice: GameSession }>;
+  collectSessionDebt: (sessionId: string, amount: number, paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card') => Promise<{ success: boolean; message: string; remainingDebt: number }>;
   updateEmployeePermissions: (employeeId: string, permissions: RolePermissions) => void;
 
   // Waitlist
@@ -1314,30 +1314,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   }, [pricingTiers, currentUser, recordAudit]);
 
-  const completeSession = useCallback((sessionId: string, checkoutData: {
+  const completeSession = useCallback(async (sessionId: string, checkoutData: {
     discountType: 'none' | 'fixed' | 'percent';
     discountValue: number;
     paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card' | 'split';
     amountReceived: number;
     splitPayments?: SplitPaymentPortion[];
-  }): { success: boolean; invoice: GameSession } => {
+  }): Promise<{ success: boolean; invoice: GameSession }> => {
     const session = sessions.find(s => s.id === sessionId);
-    if (!session) throw new Error('Session not found');
+    if (!session) throw new Error('الجلسة غير موجودة');
     if (session.status !== 'active') throw new Error('لا يمكن إغلاق جلسة غير نشطة أو تحصيلها مرة أخرى');
     if (completedSessionIds.current.has(sessionId)) throw new Error('تمت محاسبة هذه الجلسة بالفعل');
 
     const now = Date.now();
-    const finalSegments = session.segments.map(seg => ({
-      ...seg,
-      endTime: seg.endTime || now,
-    }));
-
+    const finalSegments = session.segments.map(seg => ({ ...seg, endTime: seg.endTime || now }));
     const { totalCost: gamingCost } = calculateSessionGamingCost(finalSegments, now, pricingTiers, roundingPolicy);
-    const unpaidProductsTotal = session.products
-      .filter(p => !p.isPaid)
+    const unpaidProductsTotal = session.products.filter(p => !p.isPaid)
       .reduce((acc, p) => acc + (p.unitPrice * p.quantity), 0);
     const productsTotal = session.products.reduce((acc, p) => acc + (p.unitPrice * p.quantity), 0);
-
     const invResult = calculateInvoice({
       gamingTotal: gamingCost,
       productsTotal: unpaidProductsTotal,
@@ -1368,91 +1362,180 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       changeGiven: invResult.changeGiven,
       products: session.products.map(p => ({ ...p, isPaid: true })),
     };
+    const shiftId = activeShiftId || 'owner-checkout';
+    const idempotencyKey = 'complete-' + sessionId;
+    const financials = {
+      gamingTotal: gamingCost,
+      productsTotal,
+      grandTotal: invResult.netGrandTotal,
+      actualCollected: invResult.actualCollected,
+      remainingDebt: invResult.remainingDebt,
+      discountValue: invResult.discountAmount,
+    };
+    const allocations = invResult.safeAllocations.map(alloc => ({
+      amount: alloc.amount,
+      paymentMethod: alloc.paymentMethod,
+      description: alloc.description,
+    }));
 
-    setDevices(prev => prev.map(d => d.id === session.deviceId ? {
-      ...d,
-      status: 'available',
-      currentGame: undefined,
-      activeSessionId: undefined,
-    } : d));
-
-    setSessions(prev => prev.map(s => s.id === sessionId ? updatedSession : s));
-    completedSessionIds.current.add(sessionId);
-
-    // Record safe transactions ONLY for the actual collected money, split by payment method
-    if (invResult.safeAllocations.length > 0) {
-      const dev = devices.find(d => d.id === session.deviceId);
-      const newTxs: SafeTransaction[] = invResult.safeAllocations.map((alloc, idx) => ({
-        id: `tx-${now}-${idx}`,
-        shiftId: activeShiftId || 'owner-checkout',
-        branchId: session.branchId,
-        type: 'gaming_revenue',
-        amount: alloc.amount,
-        paymentMethod: alloc.paymentMethod,
-        description: `محاسبة جلسة ${session.sessionNumber} (${dev?.screenNumber || ''}) - ${alloc.paymentMethod === 'cash' ? 'نقدي' : alloc.paymentMethod}`,
-        performedBy: currentUser?.name || 'كاشير',
-        timestamp: now,
-      }));
-      setSafeTransactions(prev => [...newTxs, ...prev]);
+    let savedSession = updatedSession;
+    let savedTransactions: Array<{id:string;created_at:string;type:string;payment_method:string;amount:number;description:string}> = [];
+    const token = getSupabaseAccessToken();
+    let queuedForSync = false;
+    if (!token) throw new Error('سجّل الدخول بالحساب السحابي قبل محاسبة الجلسة حتى لا تضيع العملية المالية.');
+    if (!navigator.onLine) {
+      queueOfflineAction('complete_session', { idempotencyKey, sessionId, shiftId, completedSession: updatedSession, financials, allocations });
+      queuedForSync = true;
+    } else {
+      try {
+        const result = await apiRequest<{
+          session?: GameSession;
+          transactions?: Array<{id:string;created_at:string;type:string;payment_method:string;amount:number;description:string}>;
+          versions?: Record<string,number>;
+        }>('/api/sessions/complete', {
+          method: 'POST',
+          body: JSON.stringify({ idempotencyKey, sessionId, shiftId, completedSession: updatedSession, financials, allocations }),
+        });
+        savedSession = result.session || updatedSession;
+        savedTransactions = result.transactions || [];
+        if (result.versions) Object.assign(cloudVersionsRef.current, result.versions);
+      } catch (error) {
+        const status = error && typeof error === 'object' && 'status' in error
+          ? Number((error as {status?:number}).status)
+          : undefined;
+        if (status !== undefined && status < 500) throw error;
+        queueOfflineAction('complete_session', { idempotencyKey, sessionId, shiftId, completedSession: updatedSession, financials, allocations });
+        queuedForSync = true;
+      }
     }
 
-    recordAudit('session_completed', `إنهاء ${session.sessionNumber} بواسطة ${currentUser?.name || 'كاشير'} — المحاسبة ${invResult.actualCollected} EGP، المديونية ${invResult.remainingDebt} EGP`);
-    return { success: true, invoice: updatedSession };
-  }, [sessions, pricingTiers, roundingPolicy, currentUser, devices, activeShiftId, recordAudit]);
+    setDevices(prev => prev.map(d => d.id === savedSession.deviceId ? {
+      ...d, status: 'available', currentGame: undefined, activeSessionId: undefined,
+    } : d));
+    setSessions(prev => prev.map(s => s.id === sessionId ? savedSession : s));
+    completedSessionIds.current.add(sessionId);
 
-  const collectSessionDebt = useCallback((
+    const fallbackTransactions = allocations.map((alloc, idx) => ({
+      id: 'pending-session-' + sessionId + '-' + idx,
+      created_at: new Date(now).toISOString(),
+      type: 'gaming_revenue',
+      payment_method: alloc.paymentMethod,
+      amount: alloc.amount,
+      description: alloc.description,
+    }));
+    const transactionsToAdd = (queuedForSync ? fallbackTransactions : savedTransactions).map(tx => ({
+      id: tx.id,
+      shiftId,
+      branchId: savedSession.branchId,
+      type: tx.type as SafeTransaction['type'],
+      amount: Number(tx.amount),
+      paymentMethod: tx.payment_method as SafeTransaction['paymentMethod'],
+      description: tx.description,
+      performedBy: currentUser?.name || 'كاشير',
+      timestamp: Date.parse(tx.created_at) || now,
+    }));
+    setSafeTransactions(prev => {
+      const incomingIds = new Set(transactionsToAdd.map(tx => tx.id));
+      return [...transactionsToAdd.filter(tx => !incomingIds.has(tx.id) && !prev.some(old => old.id === tx.id)), ...prev.filter(old => !incomingIds.has(old.id))];
+    });
+
+    if (queuedForSync) addNotification({
+      title: 'الفاتورة محفوظة محليًا',
+      message: 'تم تجهيز فاتورة الجلسة على هذا الجهاز، وسيتم تنفيذها على الخادم عند عودة الإنترنت. لا تعتبرها مؤكدة سحابيًا حتى يظهر إشعار نجاح المزامنة.',
+      type: 'warning',
+    });
+    recordAudit('session_completed', 'إنهاء ' + session.sessionNumber + ' بواسطة ' + (currentUser?.name || 'كاشير') +
+      ' — المحاسبة ' + invResult.actualCollected + ' EGP، المديونية ' + invResult.remainingDebt + ' EGP');
+    return { success: true, invoice: savedSession };
+  }, [sessions, pricingTiers, roundingPolicy, currentUser, devices, activeShiftId, recordAudit,
+      apiRequest, getSupabaseAccessToken, queueOfflineAction, addNotification]);
+
+  const collectSessionDebt = useCallback(async (
     sessionId: string,
     amount: number,
     paymentMethod: 'cash' | 'instapay' | 'vodafone' | 'card'
-  ): { success: boolean; message: string; remainingDebt: number } => {
+  ): Promise<{ success: boolean; message: string; remainingDebt: number }> => {
     const session = sessions.find(s => s.id === sessionId);
     if (!session) return { success: false, message: 'الجلسة غير موجودة', remainingDebt: 0 };
-    if (!session.remainingDebt || session.remainingDebt <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) return { success: false, message: 'أدخل مبلغًا صحيحًا', remainingDebt: Number(session.remainingDebt || 0) };
+    if (!session.remainingDebt || session.remainingDebt <= 0)
       return { success: false, message: 'لا توجد مديونية مستحقة على هذه الجلسة', remainingDebt: 0 };
-    }
-
-    const { collectedAmount, newRemainingDebt, isFullySettled, safeTransaction } = settleDebtPayment(
-      session.remainingDebt,
-      amount,
-      paymentMethod
-    );
-
-    const dev = devices.find(d => d.id === session.deviceId);
-    const tx: SafeTransaction = {
-      id: `tx-${Date.now()}`,
-      shiftId: activeShiftId || 'direct-collection',
-      branchId: session.branchId,
-      type: safeTransaction.type,
-      amount: safeTransaction.amount,
-      paymentMethod: safeTransaction.paymentMethod,
-      description: `تحصيل متبقي مديونية ${session.sessionNumber} (${dev?.screenNumber || ''}) للعميل ${session.customerName}`,
-      performedBy: currentUser?.name || 'كاشير',
-      timestamp: Date.now(),
-    };
-
-    setSafeTransactions(prev => [tx, ...prev]);
-
-    const debtRecord = {
+    const { collectedAmount, newRemainingDebt, isFullySettled } = settleDebtPayment(session.remainingDebt, amount, paymentMethod);
+    if (collectedAmount <= 0) return { success: false, message: 'المبلغ المحصل يجب أن يكون أكبر من صفر', remainingDebt: session.remainingDebt };
+    const shiftId = activeShiftId || 'direct-collection';
+    const idempotencyKey = 'debt-' + sessionId.slice(-24) + '-' +
+      Math.round(Number(session.remainingDebt) * 100) + '-' + Math.round(collectedAmount * 100) + '-' + paymentMethod;
+    const paymentRecord = {
       amount: collectedAmount,
       paidAt: Date.now(),
       paymentMethod,
       receivedBy: currentUser?.name || 'كاشير',
     };
+    const updatedSession = {
+      ...session,
+      paidAmount: session.paidAmount + collectedAmount,
+      remainingDebt: newRemainingDebt,
+      isFullyPaid: isFullySettled,
+      debtPaidHistory: [...(session.debtPaidHistory || []), paymentRecord],
+    };
+    const token = getSupabaseAccessToken();
+    if (!token) return { success: false, message: 'سجّل الدخول بالحساب السحابي قبل تحصيل المديونية.', remainingDebt: session.remainingDebt };
 
-    setSessions(prev => prev.map(s => {
-      if (s.id !== sessionId) return s;
-      return {
-        ...s,
-        paidAmount: s.paidAmount + collectedAmount,
-        remainingDebt: newRemainingDebt,
-        isFullyPaid: isFullySettled,
-        debtPaidHistory: [...(s.debtPaidHistory || []), debtRecord],
+    let savedSession = updatedSession;
+    let transaction: {id:string;created_at:string;type:string;payment_method:string;amount:number;description:string} | null = null;
+    let queuedForSync = false;
+    if (!navigator.onLine) {
+      queueOfflineAction('collect_session_debt', { idempotencyKey, sessionId, shiftId, amount: collectedAmount, paymentMethod });
+      queuedForSync = true;
+    } else {
+      try {
+        const result = await apiRequest<{
+          session?: GameSession;
+          transaction?: {id:string;created_at:string;type:string;payment_method:string;amount:number;description:string} | null;
+          versions?: Record<string,number>;
+        }>('/api/sessions/debt-payments', {
+          method: 'POST',
+          body: JSON.stringify({ idempotencyKey, sessionId, shiftId, amount: collectedAmount, paymentMethod }),
+        });
+        savedSession = result.session || updatedSession;
+        transaction = result.transaction || null;
+        if (result.versions) Object.assign(cloudVersionsRef.current, result.versions);
+      } catch (error) {
+        const status = error && typeof error === 'object' && 'status' in error
+          ? Number((error as {status?:number}).status)
+          : undefined;
+        if (status !== undefined && status < 500) return {
+          success:false,message:error instanceof Error ? error.message : 'تعذر تحصيل المديونية',remainingDebt:session.remainingDebt
+        };
+        queueOfflineAction('collect_session_debt', { idempotencyKey, sessionId, shiftId, amount: collectedAmount, paymentMethod });
+        queuedForSync = true;
+      }
+    }
+    setSessions(prev => prev.map(s => s.id === sessionId ? savedSession : s));
+    const tx = transaction || (queuedForSync ? {
+      id:'pending-debt-' + sessionId + '-' + Math.round(Date.now()/1000),
+      created_at:new Date().toISOString(),
+      type:'debt_collection',
+      payment_method:paymentMethod,
+      amount:collectedAmount,
+      description:'تحصيل مديونية جلسة ' + session.sessionNumber,
+    } : null);
+    if (tx) {
+      const safeTx: SafeTransaction = {
+        id:tx.id, shiftId, branchId:session.branchId, type:tx.type as SafeTransaction['type'],
+        amount:Number(tx.amount), paymentMethod:tx.payment_method as SafeTransaction['paymentMethod'],
+        description:tx.description, performedBy:currentUser?.name || 'كاشير', timestamp:Date.parse(tx.created_at)||Date.now(),
       };
-    }));
-
-    recordAudit('payment_received', `سداد مديونية جلسة ${session.sessionNumber} بقيمة ${collectedAmount} EGP (${paymentMethod})`);
-    return { success: true, message: `تم تحصيل مبلغ ${collectedAmount} EGP بنجاح`, remainingDebt: newRemainingDebt };
-  }, [sessions, devices, activeShiftId, currentUser, recordAudit]);
+      setSafeTransactions(prev => [safeTx,...prev.filter(old=>old.id!==safeTx.id)]);
+    }
+    if (queuedForSync) addNotification({
+      title:'تحصيل المديونية محفوظ محليًا',
+      message:'سيتم اعتماد التحصيل على الخادم عند عودة الإنترنت. لا تعتبره مؤكدًا حتى يظهر إشعار نجاح المزامنة.',
+      type:'warning',
+    });
+    recordAudit('payment_received', 'سداد مديونية جلسة ' + session.sessionNumber + ' بقيمة ' + collectedAmount + ' EGP (' + paymentMethod + ')');
+    return { success: true, message: queuedForSync ? 'تم حفظ التحصيل محليًا وينتظر المزامنة' : 'تم تحصيل مبلغ ' + collectedAmount + ' EGP بنجاح', remainingDebt: savedSession.remainingDebt || 0 };
+  }, [sessions, activeShiftId, currentUser, recordAudit, apiRequest, getSupabaseAccessToken, queueOfflineAction, addNotification]);
 
   // --------------------------------------------------------------------------
   // Waitlist
