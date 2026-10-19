@@ -331,3 +331,29 @@ test('Mixed valid and malformed split payments use only valid split amounts', ()
     [['cash', 25], ['vodafone', 15]],
   );
 });
+
+
+test('Invalid split payment methods and non-positive amounts are not counted as cash', () => {
+  const splitPayments = [
+    { method: 'bogus', amount: 100 },
+    { method: 'cash', amount: 0 },
+    { method: 'instapay', amount: -5 },
+    { method: 'vodafone', amount: 25 },
+  ] as unknown as NonNullable<Parameters<typeof calculateInvoice>[0]['splitPayments']>;
+
+  const result = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 0,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 0,
+    amountReceived: 100,
+    splitPayments,
+  });
+
+  assert.equal(result.actualCollected, 25);
+  assert.equal(result.remainingDebt, 75);
+  assert.equal(result.safeAllocations.length, 1);
+  assert.equal(result.safeAllocations[0].paymentMethod, 'vodafone');
+  assert.equal(result.safeAllocations[0].amount, 25);
+});
