@@ -235,7 +235,7 @@ function registerSessionFinanceRoutes(app, deps) {
   });
 
   app.get('/api/finance/session-invoices',requireAuth,requireRole('owner','admin','supervisor'),async(req,res) => {
-    const scope=resolveBranchFilter(authFromRequest(req),typeof req.query.branchId==='string'?req.query.branchId:null);
+    const scope=resolveBranchFilter(req.auth,typeof req.query.branchId==='string'?req.query.branchId:null);
     if(!scope.allowed) return fail(res,scope.status,scope.code,scope.message);
     const from=typeof req.query.from==='string'?req.query.from:null, to=typeof req.query.to==='string'?req.query.to:null;
     if((from&&!Number.isFinite(Date.parse(from)))||(to&&!Number.isFinite(Date.parse(to))))
@@ -255,7 +255,7 @@ function registerSessionFinanceRoutes(app, deps) {
   });
 
   app.get('/api/finance/session-debt-payments',requireAuth,requireRole('owner','admin','supervisor'),async(req,res) => {
-    const scope=resolveBranchFilter(authFromRequest(req),typeof req.query.branchId==='string'?req.query.branchId:null);
+    const scope=resolveBranchFilter(req.auth,typeof req.query.branchId==='string'?req.query.branchId:null);
     if(!scope.allowed) return fail(res,scope.status,scope.code,scope.message);
     try {
       const params=[],filters=[];
