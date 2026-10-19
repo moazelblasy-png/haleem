@@ -4,6 +4,8 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const {
   authorizeBranch,
+  canWriteBranchScopedState,
+  mergeBranchScopedArray,
   resolveBranchFilter,
   scopeOperationalState,
 } = require('./branch-access.cjs');
@@ -64,4 +66,49 @@ test('operational state returned to staff contains only their branch', () => {
   assert.equal(scoped.lg_active_shift_id, 'sh1');
   assert.deepEqual(scoped.lg_notifications.map((x) => x.id), ['n1']);
   assert.deepEqual(scoped.lg_pricing_tiers, state.lg_pricing_tiers);
+});
+
+test('staff state write permissions are narrow and role-specific', () => {
+  assert.equal(canWriteBranchScopedState('cashier', 'lg_sessions'), true);
+  assert.equal(canWriteBranchScopedState('cashier', 'lg_devices'), false);
+  assert.equal(canWriteBranchScopedState('technician', 'lg_devices'), true);
+  assert.equal(canWriteBranchScopedState('technician', 'lg_sessions'), false);
+  assert.equal(canWriteBranchScopedState('supervisor', 'lg_shifts'), true);
+  assert.equal(canWriteBranchScopedState('cashier', 'lg_employees'), false);
+  assert.equal(canWriteBranchScopedState('cashier', 'lg_inventory'), false);
+});
+
+test('branch-scoped state updates preserve every other branch', () => {
+  const current = [
+    { id: 'session-a', branchId: 'liverpool', status: 'active' },
+    { id: 'session-b', branchId: 'chelsea', status: 'active' },
+  ];
+  const next = mergeBranchScopedArray(
+    current,
+    [{ id: 'session-c', branchId: 'liverpool', status: 'completed' }],
+    'liverpool',
+    'lg_sessions',
+  );
+  assert.deepEqual(next, [
+    { id: 'session-b', branchId: 'chelsea', status: 'active' },
+    { id: 'session-c', branchId: 'liverpool', status: 'completed' },
+  ]);
+});
+
+test('branch-scoped state rejects cross-branch, duplicate and malformed items', () => {
+  assert.throws(
+    () => mergeBranchScopedArray([], [{ id: 'x', branchId: 'chelsea' }], 'liverpool', 'lg_sessions'),
+    /outside the assigned branch/,
+  );
+  assert.throws(
+    () => mergeBranchScopedArray([], [
+      { id: 'x', branchId: 'liverpool' },
+      { id: 'x', branchId: 'liverpool' },
+    ], 'liverpool', 'lg_sessions'),
+    /duplicate item id/,
+  );
+  assert.throws(
+    () => mergeBranchScopedArray([], { id: 'x', branchId: 'liverpool' }, 'liverpool', 'lg_sessions'),
+    /must be an array/,
+  );
 });
