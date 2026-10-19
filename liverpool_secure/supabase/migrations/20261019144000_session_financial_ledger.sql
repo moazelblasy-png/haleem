@@ -11,6 +11,7 @@ create table if not exists public.liverpool_session_invoices (
   customer_phone text,
   gaming_total numeric(12,2) not null check (gaming_total >= 0),
   products_total numeric(12,2) not null check (products_total >= 0),
+  billable_products_total numeric(12,2) not null default 0 check (billable_products_total >= 0),
   discount_type text not null check (discount_type in ('none','fixed','percent')),
   discount_value numeric(12,2) not null default 0 check (discount_value >= 0),
   discount_amount numeric(12,2) not null default 0 check (discount_amount >= 0),
@@ -47,6 +48,7 @@ create index if not exists liverpool_session_debt_payments_session_idx
   on public.liverpool_session_debt_payments (session_id, created_at);
 
 alter table public.liverpool_session_invoices add column if not exists discount_amount numeric(12,2) not null default 0 check (discount_amount >= 0);
+alter table public.liverpool_session_invoices add column if not exists billable_products_total numeric(12,2) not null default 0 check (billable_products_total >= 0);
 
 alter table public.liverpool_cash_transactions add column if not exists reference_type text;
 alter table public.liverpool_cash_transactions add column if not exists reference_id text;
