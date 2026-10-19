@@ -63,6 +63,7 @@ export const ReportsView: React.FC = () => {
   const [sessionDebtPayments, setSessionDebtPayments] = useState<SessionDebtPaymentReport[]>([]);
   const [financeReportLoading, setFinanceReportLoading] = useState(false);
   const [financeReportError, setFinanceReportError] = useState('');
+  const [financeRefreshSequence, setFinanceRefreshSequence] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -136,7 +137,7 @@ export const ReportsView: React.FC = () => {
     };
     void loadFinancialReports();
     return () => { cancelled = true; };
-  }, [currentUser, activeBranch?.id]);
+  }, [currentUser, activeBranch?.id, financeRefreshSequence]);
 
   // Device analytics
   const deviceStats = devices.map(dev => {
@@ -255,7 +256,7 @@ export const ReportsView: React.FC = () => {
                 <h3 className="text-sm font-bold text-white">فواتير جلسات اللعب المسجلة على الخادم</h3>
                 <p className="text-xs text-gray-400 mt-1">يعرض هذا التقرير الفواتير المؤكدة في قاعدة البيانات، وليس مجرد الحالة المحلية للمتصفح.</p>
               </div>
-              <button onClick={() => { playClickSound(); setActiveTab('finance'); }} className="text-xs text-red-300 font-bold">تحديث عند إعادة فتح التقرير</button>
+              <button onClick={() => { playClickSound(); setFinanceRefreshSequence(value => value + 1); }} className="text-xs text-red-300 font-bold">تحديث التقرير</button>
             </div>
             {financeReportLoading ? (
               <div className="p-8 text-center text-gray-400 text-sm">جارٍ تحميل الفواتير والمديونيات...</div>
