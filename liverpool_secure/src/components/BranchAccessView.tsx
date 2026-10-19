@@ -96,7 +96,7 @@ export const BranchAccessView: React.FC = () => {
     if (!selected) return;
     setRole(selected.role && ['admin', 'supervisor', 'cashier', 'technician'].includes(selected.role) ? selected.role : 'cashier');
     setBranchId(selected.branchId || branches[0]?.id || 'liverpool');
-    setIsActive(selected.isActive ?? true);
+    setIsActive(selected.role ? selected.isActive : true);
   }, [selected, branches]);
 
   const filteredMembers = useMemo(() => {
