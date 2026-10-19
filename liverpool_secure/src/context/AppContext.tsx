@@ -380,21 +380,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const cloudSaveQueuesRef = useRef<Record<string, Promise<void>>>({});
   const saleIdempotencyKeyRef = useRef<string | null>(null);
 
-  // Read only a Supabase Auth session token. Local app PIN state is never accepted as API identity.
+  // Read only the token belonging to the identity currently signed in through Supabase Auth.
+  // A local employee PIN must never inherit a previous owner's browser token.
+  const cloudAuthUserIdRef = useRef<string | null>(null);
   const getSupabaseAccessToken = useCallback((): string | null => {
     try {
+      const expectedUserId = cloudAuthUserIdRef.current || currentUser?.id;
+      if (!expectedUserId) return null;
+
       const ownSession = JSON.parse(localStorage.getItem('lg_supabase_session') || 'null');
-      if (typeof ownSession?.access_token === 'string' && ownSession.access_token.length > 20) return ownSession.access_token;
+      if (typeof ownSession?.access_token === 'string' &&
+          ownSession.access_token.length > 20 &&
+          ownSession.user?.id === expectedUserId) {
+        return ownSession.access_token;
+      }
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
         if (!key || !/^sb-.+-auth-token$/.test(key)) continue;
         const value = JSON.parse(localStorage.getItem(key) || '{}');
-        const token = value?.access_token || value?.currentSession?.access_token || value?.session?.access_token;
-        if (typeof token === 'string' && token.length > 20) return token;
+        const session = value?.currentSession || value?.session || value;
+        if (typeof session?.access_token === 'string' &&
+            session.access_token.length > 20 &&
+            session.user?.id === expectedUserId) return session.access_token;
       }
     } catch {}
     return null;
-  }, []);
+  }, [currentUser]);
 
   const apiHeaders = useCallback((extra: Record<string, string> = {}): Record<string, string> => {
     const token = getSupabaseAccessToken();
@@ -781,6 +792,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem('lg_owner_bootstrap_code', data.bootstrapCode);
       if (!session.access_token) return { success: true, requiresEmailConfirmation: true, message: 'تم إنشاء الحساب وإرسال طلب تأكيد البريد. افتح رسالة التأكيد في البريد الوارد أو Spam؛ لا تعِد التسجيل. بعد التأكيد سجّل الدخول لإكمال تهيئة المالك.' };
       localStorage.setItem('lg_supabase_session', JSON.stringify(session));
+      cloudAuthUserIdRef.current = String(session.user?.id || '');
       const boot = await apiRequest<{ user: { id: string; name: string; phone: string; role: string } }>('/api/auth/bootstrap-owner', { method: 'POST', body: JSON.stringify({ name: data.name.trim(), phone: data.phone.trim(), bootstrapCode: data.bootstrapCode }) });
       await apiRequest('/api/owner/profile', {
         method: 'PUT',
@@ -791,7 +803,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setOwnerProfile(profile);
       setCurrentUser({ id: boot.user.id, name: profile.name, phone: profile.phone, role: 'owner', pinOrPassword: '', isOwner: true });
       return { success: true, requiresEmailConfirmation: false, message: 'تم إنشاء حساب المالك وربطه بالخادم بنجاح.' };
-    } catch (e) { localStorage.removeItem('lg_supabase_session'); return { success: false, requiresEmailConfirmation: false, message: e instanceof Error ? e.message : 'تعذر إنشاء حساب المالك' }; }
+    } catch (e) { localStorage.removeItem('lg_supabase_session'); cloudAuthUserIdRef.current = null; return { success: false, requiresEmailConfirmation: false, message: e instanceof Error ? e.message : 'تعذر إنشاء حساب المالك' }; }
   }, [ownerProfile, supabaseAuthRequest, apiRequest]);
 
   const loginWithSupabase = useCallback(async (email: string, password: string) => {
@@ -799,6 +811,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const session = await supabaseAuthRequest('token?grant_type=password', { email: email.trim(), password });
       if (!session.access_token) return { success: false, message: 'لم يُرجع خادم المصادقة جلسة صالحة.' };
       localStorage.setItem('lg_supabase_session', JSON.stringify(session));
+      cloudAuthUserIdRef.current = String(session.user?.id || '');
       let me: { user: { id: string; role: User['role']; email?: string | null } };
       try {
         me = await apiRequest<{ user: { id: string; role: User['role']; email?: string | null } }>('/api/auth/me');
@@ -864,7 +877,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCurrentUser({ id: me.user.id, name: String(displayName), phone: String(session.user?.user_metadata?.phone || cloudOwner?.phone || ''), role: me.user.role, pinOrPassword: '', isOwner: me.user.role === 'owner' });
       if (cloudOwner) setOwnerProfile(cloudOwner);
       return { success: true, message: `تم تسجيل الدخول بصلاحية ${me.user.role}.` };
-    } catch (e) { localStorage.removeItem('lg_supabase_session'); return { success: false, message: e instanceof Error ? e.message : 'فشل تسجيل الدخول أو الحساب غير مخوّل' }; }
+    } catch (e) { localStorage.removeItem('lg_supabase_session'); cloudAuthUserIdRef.current = null; return { success: false, message: e instanceof Error ? e.message : 'فشل تسجيل الدخول أو الحساب غير مخوّل' }; }
   }, [supabaseAuthRequest, apiRequest]);
 
   const setupPrimaryOwner = useCallback((data: { name: string; phone: string; pinOrPassword: string; enable2FA?: boolean }): boolean => {
@@ -952,6 +965,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logoutUser = useCallback(() => {
     localStorage.removeItem('lg_supabase_session');
+    cloudAuthUserIdRef.current = null;
     setCurrentUser(null);
   }, []);
 
