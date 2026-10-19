@@ -337,6 +337,11 @@ async function resolveSupabaseUser(req) {
   return user?.id && uuidPattern.test(user.id) ? user : null;
 }
 function validIdempotency(value) { return typeof value === 'string' && /^[a-zA-Z0-9:_-]{8,128}$/.test(value); }
+const sessionFinance = require('./session-finance.cjs').registerSessionFinanceRoutes(app, {
+  pool, query, requireAuth, requireRole, fail, loadLockedState, writeStateValue,
+  mergeBranchScopedArray, authorizeBranch, isManagementRole, resolveBranchFilter,
+  validBranchId, validIdempotency,
+});
 app.post('/api/auth/bootstrap-owner', async (req, res) => {
   try {
     const expectedBootstrapCode = process.env.OWNER_BOOTSTRAP_CODE;
