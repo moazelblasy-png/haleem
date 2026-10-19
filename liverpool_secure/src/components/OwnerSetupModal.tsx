@@ -40,7 +40,15 @@ export const OwnerSetupModal: React.FC<OwnerSetupModalProps> = ({ isOpen, onClos
     if (pin !== confirmPin) { setErrorMessage('كلمتا المرور غير متطابقتين'); return; }
     const result = await registerOwnerAccount({ name: name.trim(), phone: phone.trim(), email: email.trim(), password: pin, bootstrapCode: bootstrapCode.trim() });
     if (result.success) {
-      playClickSound(); setSuccessMessage(result.message); setShowRegister(false);
+      playClickSound();
+      setSuccessMessage(result.message);
+      setShowRegister(false);
+      if (result.requiresEmailConfirmation) {
+        // Keep the modal open so the owner can read the confirmation instructions.
+        // Avoid encouraging another signup attempt while Supabase email delivery is rate-limited.
+        setLoginEmail(email.trim());
+        return;
+      }
       setTimeout(() => onClose(), 1000);
     } else setErrorMessage(result.message);
   };

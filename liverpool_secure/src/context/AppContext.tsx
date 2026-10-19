@@ -250,7 +250,7 @@ interface AppContextType {
   setThemeAccent: (theme: 'red' | 'blue' | 'emerald' | 'purple' | 'amber') => void;
   updateSupabaseConfig: (config: Partial<SupabaseConfig>) => void;
   setupPrimaryOwner: (ownerData: { name: string; phone: string; pinOrPassword: string; enable2FA?: boolean }) => boolean;
-  registerOwnerAccount: (data: { name: string; phone: string; email: string; password: string; bootstrapCode: string }) => Promise<{ success: boolean; message: string }>;
+  registerOwnerAccount: (data: { name: string; phone: string; email: string; password: string; bootstrapCode: string }) => Promise<{ success: boolean; message: string; requiresEmailConfirmation?: boolean }>;
   loginWithSupabase: (email: string, password: string) => Promise<{ success: boolean; message: string }>;
   loginUser: (phone: string, pin: string) => { success: boolean; message: string; requires2FA?: boolean };
   verify2FACode: (code: string) => boolean;
@@ -407,7 +407,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!url || !key) throw new Error('إعدادات Supabase غير موجودة في ملف .env');
     const response = await fetch(`${url.replace(/\/+$/, '')}/auth/v1/${path}`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.msg || payload.message || payload.error_description || payload.error || 'فشل تسجيل الدخول');
+    const rawMessage = payload.msg || payload.message || payload.error_description || payload.error || '';
+    const authMessage = typeof rawMessage === 'string' ? rawMessage : String(rawMessage?.message || '');
+    const authCode = String(payload.error_code || payload.code || payload.error?.code || '').toLowerCase();
+    if (!response.ok) {
+      if (authCode === 'over_email_send_rate_limit' || /email rate limit exceeded|over_email_send_rate_limit/i.test(authMessage)) {
+        throw new Error('وصلنا للحد المؤقت لإرسال رسائل التأكيد. لا تعِد إنشاء الحساب؛ افتح رسالة التأكيد الموجودة في بريدك الوارد أو مجلد Spam، ثم جرّب الدخول بعد تأكيد البريد.');
+      }
+      if (authCode === 'email_not_confirmed' || /email not confirmed/i.test(authMessage)) {
+        throw new Error('الحساب اتعمل بالفعل لكن البريد الإلكتروني لم يتم تأكيده. افتح رسالة التأكيد في البريد الوارد أو Spam، ثم حاول تسجيل الدخول.');
+      }
+      if (authCode === 'invalid_credentials' || /invalid login credentials/i.test(authMessage)) {
+        throw new Error('البريد الإلكتروني أو كلمة المرور غير صحيحة. لو أنشأت الحساب للتو، أكّد البريد الإلكتروني من رسالة التأكيد أولًا.');
+      }
+      throw new Error(authMessage || 'فشل تسجيل الدخول');
+    }
     return payload;
   }, []);
 
@@ -728,15 +742,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const session = await supabaseAuthRequest('signup', { email: data.email.trim(), password: data.password, data: { name: data.name.trim(), phone: data.phone.trim() } });
       localStorage.setItem('lg_owner_bootstrap_code', data.bootstrapCode);
-      if (!session.access_token) return { success: true, message: 'تم إنشاء الحساب. أكّد البريد الإلكتروني ثم افتح تسجيل الدخول لإكمال تهيئة المالك.' };
+      if (!session.access_token) return { success: true, requiresEmailConfirmation: true, message: 'تم إنشاء الحساب وإرسال طلب تأكيد البريد. افتح رسالة التأكيد في البريد الوارد أو Spam؛ لا تعِد التسجيل. بعد التأكيد سجّل الدخول لإكمال تهيئة المالك.' };
       localStorage.setItem('lg_supabase_session', JSON.stringify(session));
       const boot = await apiRequest<{ user: { id: string; name: string; phone: string; role: string } }>('/api/auth/bootstrap-owner', { method: 'POST', body: JSON.stringify({ name: data.name.trim(), phone: data.phone.trim(), bootstrapCode: data.bootstrapCode }) });
       localStorage.removeItem('lg_owner_bootstrap_code');
       const profile: OwnerProfile = { id: boot.user.id, name: data.name.trim(), phone: data.phone.trim(), pinHash: '', businessName: 'Liverpool Gaming', subscriptionPlan: 'Multi-Branch', renewalDate: '', createdAt: Date.now(), twoFactorEnabled: false };
       setOwnerProfile(profile);
       setCurrentUser({ id: boot.user.id, name: profile.name, phone: profile.phone, role: 'owner', pinOrPassword: '', isOwner: true });
-      return { success: true, message: 'تم إنشاء حساب المالك وربطه بالخادم بنجاح.' };
-    } catch (e) { localStorage.removeItem('lg_supabase_session'); return { success: false, message: e instanceof Error ? e.message : 'تعذر إنشاء حساب المالك' }; }
+      return { success: true, requiresEmailConfirmation: false, message: 'تم إنشاء حساب المالك وربطه بالخادم بنجاح.' };
+    } catch (e) { localStorage.removeItem('lg_supabase_session'); return { success: false, requiresEmailConfirmation: false, message: e instanceof Error ? e.message : 'تعذر إنشاء حساب المالك' }; }
   }, [ownerProfile, supabaseAuthRequest, apiRequest]);
 
   const loginWithSupabase = useCallback(async (email: string, password: string) => {
