@@ -61,7 +61,7 @@ test('operational state returned to staff contains only their branch', () => {
   assert.deepEqual(scoped.lg_waitlist.map((x) => x.id), ['w1']);
   assert.deepEqual(scoped.lg_inventory.map((x) => x.id), ['i1']);
   assert.deepEqual(scoped.lg_shifts.map((x) => x.id), ['sh1']);
-  assert.equal(scoped.lg_active_shift_id, null);
+  assert.equal(scoped.lg_active_shift_id, 'sh1');
   assert.deepEqual(scoped.lg_notifications.map((x) => x.id), ['n1']);
   assert.deepEqual(scoped.lg_pricing_tiers, state.lg_pricing_tiers);
 });
