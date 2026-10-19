@@ -1859,6 +1859,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateSupabaseConfig,
         setupPrimaryOwner,
         registerOwnerAccount,
+        resendOwnerConfirmation,
         loginWithSupabase,
         loginUser,
         verify2FACode,
