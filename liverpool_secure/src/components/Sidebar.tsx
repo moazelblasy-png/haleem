@@ -12,7 +12,8 @@ import {
   BarChart3,
   Settings,
   Power,
-  Lock
+  Lock,
+  KeyRound
 } from 'lucide-react';
 import { playClickSound } from '../utils/sound';
 
@@ -40,6 +41,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose, onLogoutClick
     { id: 'shifts', label: 'الورديات والتسليم', icon: CalendarCheck2, allowed: true },
     { id: 'reports', label: 'التقارير وتصدير PDF', icon: BarChart3, allowed: isOwner || perms?.reports },
     { id: 'settings', label: 'الأسعار وقاعدة البيانات', icon: Settings, allowed: isOwner || perms?.settings },
+    { id: 'branchAccess', label: 'صلاحيات حسابات الفروع', icon: KeyRound, allowed: isOwner },
   ];
 
   const handleNavClick = (viewId: string) => {
