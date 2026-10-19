@@ -1533,7 +1533,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const token = getSupabaseAccessToken();
     if (!token) return { success: false, message: 'سجّل الدخول بالحساب السحابي قبل تحصيل المديونية.', remainingDebt: session.remainingDebt };
 
-    let savedSession = updatedSession;
+    let savedSession: GameSession = updatedSession;
     let transaction: {id:string;created_at:string;type:string;payment_method:string;amount:number;description:string} | null = null;
     let queuedForSync = false;
     if (!navigator.onLine) {
