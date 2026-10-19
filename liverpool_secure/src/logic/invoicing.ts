@@ -79,13 +79,14 @@ export function calculateInvoice(input: InvoiceCalculationInput): InvoiceCalcula
     ? input.splitPayments.filter((portion): portion is SplitPaymentPortion => Boolean(portion && typeof portion === 'object'))
     : [];
 
-  // Validate received amount
+  // If the caller supplied split-payment entries, never fall back to amountReceived
+  // when every entry is malformed. Doing so could mark a split invoice paid without a
+  // valid payment allocation. A partially valid list uses only its valid entries.
+  const hasSplitPaymentInput = Array.isArray(input.splitPayments) && input.splitPayments.length > 0;
   let totalReceived = nonNegativeFinite(input.amountReceived);
-  
-  // If split payments are provided, ensure total received matches the split portions
-  if (splitPayments.length > 0) {
-    const splitSum = splitPayments.reduce((sum, p) => sum + nonNegativeFinite(p.amount), 0);
-    totalReceived = splitSum;
+
+  if (hasSplitPaymentInput) {
+    totalReceived = splitPayments.reduce((sum, p) => sum + nonNegativeFinite(p.amount), 0);
   }
 
   let changeGiven = 0;
