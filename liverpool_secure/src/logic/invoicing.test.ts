@@ -215,3 +215,54 @@ test('Debt settlement caps collected amount at debt and returns excess as change
   assert.equal(result.safeTransaction.amount, 35);
   assert.equal(result.safeTransaction.paymentMethod, 'instapay');
 });
+
+
+test('Non-finite invoice amounts are treated as zero instead of poisoning totals with NaN', () => {
+  const result = calculateInvoice({
+    gamingTotal: Number.NaN,
+    productsTotal: 50,
+    discountType: 'fixed',
+    discountValue: Number.POSITIVE_INFINITY,
+    prepaidAmount: Number.NaN,
+    amountReceived: Number.POSITIVE_INFINITY,
+  });
+
+  assert.equal(result.grossTotal, 50);
+  assert.equal(result.discountAmount, 0);
+  assert.equal(result.netGrandTotal, 50);
+  assert.equal(result.effectiveBalanceDue, 50);
+  assert.equal(result.actualCollected, 0);
+  assert.equal(result.changeGiven, 0);
+  assert.equal(result.remainingDebt, 50);
+  assert.equal(result.safeAllocations.length, 0);
+});
+
+test('Non-finite split-payment values do not create invalid safe allocations', () => {
+  const result = calculateInvoice({
+    gamingTotal: 100,
+    productsTotal: 0,
+    discountType: 'none',
+    discountValue: 0,
+    prepaidAmount: 0,
+    amountReceived: 100,
+    splitPayments: [
+      { method: 'cash', amount: Number.NaN },
+      { method: 'instapay', amount: 40 },
+    ],
+  });
+
+  assert.equal(result.actualCollected, 40);
+  assert.equal(result.safeAllocations.length, 1);
+  assert.equal(result.safeAllocations[0].paymentMethod, 'instapay');
+  assert.equal(result.safeAllocations[0].amount, 40);
+});
+
+test('Debt settlement sanitizes non-finite amounts and unknown runtime payment methods', () => {
+  const result = settleDebtPayment(Number.POSITIVE_INFINITY, Number.NaN, 'bogus' as 'cash');
+
+  assert.equal(result.collectedAmount, 0);
+  assert.equal(result.newRemainingDebt, 0);
+  assert.equal(result.changeGiven, 0);
+  assert.equal(result.safeTransaction.amount, 0);
+  assert.equal(result.safeTransaction.paymentMethod, 'cash');
+});
