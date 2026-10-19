@@ -9,7 +9,7 @@ interface OwnerSetupModalProps {
 }
 
 export const OwnerSetupModal: React.FC<OwnerSetupModalProps> = ({ isOpen, onClose }) => {
-  const { ownerProfile, registerOwnerAccount, loginWithSupabase } = useApp();
+  const { ownerProfile, registerOwnerAccount, resendOwnerConfirmation, loginWithSupabase } = useApp();
   const [showRegister, setShowRegister] = useState(!ownerProfile);
   const isFirstTime = showRegister;
 
@@ -58,6 +58,15 @@ export const OwnerSetupModal: React.FC<OwnerSetupModalProps> = ({ isOpen, onClos
     const result = await loginWithSupabase(loginEmail.trim(), loginPin);
     if (result.success) {
       playClickSound(); setSuccessMessage(result.message); setTimeout(() => onClose(), 700);
+    } else setErrorMessage(result.message);
+  };
+
+  const handleResendConfirmation = async () => {
+    setErrorMessage(''); setSuccessMessage('');
+    const result = await resendOwnerConfirmation(loginEmail.trim());
+    if (result.success) {
+      playClickSound();
+      setSuccessMessage(result.message);
     } else setErrorMessage(result.message);
   };
 
@@ -250,6 +259,15 @@ export const OwnerSetupModal: React.FC<OwnerSetupModalProps> = ({ isOpen, onClos
               >
                 {requires2FA ? 'تأكيد رمز التحقق' : 'تسجيل الدخول'}
               </button>
+              {!requires2FA && (
+                <button
+                  type="button"
+                  onClick={handleResendConfirmation}
+                  className="w-full border border-[#383b50] hover:border-red-500/60 text-gray-300 hover:text-white font-semibold py-2.5 rounded-xl transition cursor-pointer text-sm"
+                >
+                  إعادة إرسال رسالة تأكيد البريد
+                </button>
+              )}
             </form>
           )}
 
